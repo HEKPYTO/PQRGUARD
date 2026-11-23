@@ -99,7 +99,8 @@ The paper reports 2.5x HNSW with AVX-512 C++ kernels. This portable Rust v0.1
 uses byte lookup tables and an in-memory scan; its measured ratio is 3.95x on
 SIFT10k. On SIFT1M (100 partitions, one 128-bit stage) the build took 83 s; a
 certified query took 42.15 ms p50 versus 0.209 ms for USearch HNSW at recall
-1.000, a ratio of 201.6x. The 4x gate is **not met at 1M**. A 100M run needs a
+1.000, a ratio of 201.6x. The 4x gate is **not met at 1M**. The 1M index is
+564 MB for 512 MB of raw vectors, or 1.10x raw. A 100M run needs a
 disk-backed build: 100M x 128 fp32 is 51.2 GB of raw vectors against 24 GB of
 host RAM, and the public SIFT bundle stops at 1M.
 
@@ -135,6 +136,17 @@ CI runs format, clippy, and the release test suite. The nightly workflow runs a
 - The index is static in v0.1: there is no insert, delete, or merge API.
 - A passing audit is evidence, not a theorem. The theorem is the certificate's
   warrant, subject to its stated assumptions.
+- A known rotation lets an adversary choose always-pruned queries; the failure
+  probability approaches 1. Keep the seed out of the index, logs, and repository.
+- Choosing a query from a prior result breaks independence; `--adaptive`
+  returns a degraded record.
+- Maintaining the index from observed results also breaks the independence
+  condition; v0.1 accepts no such updates.
+- A graph backend cannot enumerate missed neighbours; PQR never certifies one.
+- Inner product is unsupported. Normalise vectors before build and query for
+  cosine similarity; the certificate remains an L2 statement.
+- A seed commitment is not a secret-sharing scheme. Use 32 random bytes and
+  keep them in the chosen custody source.
 
 ## License
 

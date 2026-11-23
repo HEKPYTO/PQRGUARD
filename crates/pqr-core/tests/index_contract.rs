@@ -212,3 +212,72 @@ fn corrupt_index_is_rejected() {
         Err(IndexError::Checksum)
     ));
 }
+
+#[test]
+fn build_and_query_reject_bad_inputs() {
+    let cfg = BuildConfig {
+        partitions: 2,
+        stages: vec![4, 8],
+        iterations: 1,
+    };
+    assert!(matches!(
+        PqrIndex::build(&[], 8, &cfg, &[1u8; 32]),
+        Err(IndexError::Vectors)
+    ));
+    let mut values = data(20, 8);
+    values[0] = f32::NAN;
+    assert!(matches!(
+        PqrIndex::build(&values, 8, &cfg, &[1u8; 32]),
+        Err(IndexError::NonFinite)
+    ));
+    let (index, vectors) = build(12);
+    let target = Target::new(3, 1.0, 0.01).unwrap();
+    let opts = QueryOptions {
+        target,
+        nprobe: 1,
+        reasons: Vec::new(),
+        stage_eps: None,
+    };
+    assert!(matches!(
+        index.query(&[0.0; 11], &opts),
+        Err(IndexError::Dimension)
+    ));
+    let mut q = vectors[..12].to_vec();
+    q[0] = f32::NAN;
+    assert!(matches!(index.query(&q, &opts), Err(IndexError::NonFinite)));
+    assert!(matches!(
+        index.query(
+            &vectors[..12],
+            &QueryOptions {
+                target,
+                nprobe: 0,
+                reasons: Vec::new(),
+                stage_eps: None,
+            }
+        ),
+        Err(IndexError::Nprobe)
+    ));
+}
+
+#[test]
+fn out_of_distribution_queries_stay_correct() {
+    let dim = 16;
+    let (index, vectors) = build(dim);
+    let target = Target::new(10, 1.0, 0.01).unwrap();
+    let opts = QueryOptions {
+        target,
+        nprobe: 2,
+        reasons: Vec::new(),
+        stage_eps: None,
+    };
+    for offset in [20.0f32, 80.0, 200.0] {
+        let q: Vec<f32> = (0..dim).map(|j| offset + j as f32 * 0.01).collect();
+        let outcome = index.query(&q, &opts).unwrap();
+        let QueryOutcome::Certified { hits, .. } = outcome else {
+            panic!("expected certified");
+        };
+        let truth = brute(&vectors, dim, &q, 10);
+        let got: Vec<u64> = hits.iter().map(|h| h.id).collect();
+        assert_eq!(got, truth, "offset {offset}");
+    }
+}
