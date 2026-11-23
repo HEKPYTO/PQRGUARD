@@ -1,0 +1,19 @@
+[package]
+name = "pqr-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "pqr-guard"
+path = "src/main.rs"
+
+[dependencies]
+pqr-core.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+npyz.workspace = true
+blake3.workspace = true
+usearch = "2.26"

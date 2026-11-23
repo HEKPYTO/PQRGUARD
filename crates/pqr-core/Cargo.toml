@@ -1,0 +1,20 @@
+[package]
+name = "pqr-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[dependencies]
+rand.workspace = true
+rand_chacha.workspace = true
+rand_distr.workspace = true
+rayon.workspace = true
+faer.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+blake3.workspace = true
