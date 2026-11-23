@@ -45,19 +45,28 @@ Exit `3` on audit failure, `4` on configuration or I/O errors.
 ```sh
 pqrguard bench --index idx/ --queries q.npy --seed-file seed.bin \
   --k 10 --tau 1 --delta 0.01 --nprobe 2 --repeat 5 \
-  --baseline usearch-hnsw --report bench.json
+  --baseline usearch-hnsw --hnsw-cache hnsw.usearch --report bench.json
 ```
 
 `--baseline brute` times exact brute force. `--baseline usearch-hnsw` builds a
 USearch HNSW graph with connectivity 32 and expansion 200, tunes `efSearch` to
 average recall at least 0.99, and reports p50, p95, recall, and the PQR/HNSW
-ratio. HNSW is a baseline only; it is never certified.
+ratio. `--hnsw-cache` reuses a serialized USearch graph across runs. HNSW is a
+baseline only; it is never certified. Use `--baseline none` to time only PQR.
 
 ## Seed custody
 
-`--seed-file` must contain exactly 32 bytes. The seed never appears in the index,
-certificate, report, or logs. The index manifest stores only
-`blake3(seed)`. A wrong seed is rejected with `SeedMismatch`.
+Supply exactly one seed source:
+
+- `--seed-file PATH`: 32 raw bytes.
+- `--seed-env VAR`: 32 raw bytes or 64 hex characters.
+- `--seed-command CMD`: run `sh -c CMD`; stdout must be 32 raw bytes or 64 hex
+  characters. Use this to call a KMS CLI.
+
+The seed never appears in the index, certificate, report, stdout, or logs. The
+index manifest stores only `blake3(seed)`. A wrong seed is rejected with
+`SeedMismatch`. The audit master seed is derived from the index seed with a
+domain separator unless `--audit-seed-file` is supplied.
 
 ## Exit codes
 

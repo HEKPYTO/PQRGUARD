@@ -48,8 +48,8 @@ struct BuildArgs {
     partitions: usize,
     #[arg(long, default_value = "auto")]
     code_bits: String,
-    #[arg(long)]
-    seed_file: PathBuf,
+    #[command(flatten)]
+    seed: SeedArgs,
     #[arg(long)]
     out: PathBuf,
     #[arg(long, default_value_t = 10)]
@@ -62,8 +62,8 @@ struct QueryArgs {
     index: PathBuf,
     #[arg(long)]
     queries: PathBuf,
-    #[arg(long)]
-    seed_file: PathBuf,
+    #[command(flatten)]
+    seed: SeedArgs,
     #[arg(long)]
     k: usize,
     #[arg(long)]
@@ -92,8 +92,8 @@ struct AuditArgs {
     index: PathBuf,
     #[arg(long)]
     queries: PathBuf,
-    #[arg(long)]
-    seed_file: PathBuf,
+    #[command(flatten)]
+    seed: SeedArgs,
     #[arg(long)]
     k: usize,
     #[arg(long)]
@@ -118,8 +118,8 @@ struct BenchArgs {
     index: PathBuf,
     #[arg(long)]
     queries: PathBuf,
-    #[arg(long)]
-    seed_file: PathBuf,
+    #[command(flatten)]
+    seed: SeedArgs,
     #[arg(long)]
     k: usize,
     #[arg(long)]
@@ -134,6 +134,8 @@ struct BenchArgs {
     baseline: String,
     #[arg(long)]
     report: Option<PathBuf>,
+    #[arg(long)]
+    hnsw_cache: Option<PathBuf>,
 }
 
 fn main() {
@@ -175,7 +177,7 @@ fn build(args: BuildArgs) -> CliResult<i32> {
             .ok_or_else(|| config_error("empty array shape"))?,
     };
     let stages = parse_stages(&args.code_bits, dim)?;
-    let seed = read_seed(&args.seed_file)?;
+    let seed = args.seed.read()?;
     let cfg = BuildConfig {
         partitions: args.partitions,
         stages,
@@ -188,7 +190,7 @@ fn build(args: BuildArgs) -> CliResult<i32> {
 }
 
 fn query(args: QueryArgs) -> CliResult<i32> {
-    let seed = read_seed(&args.seed_file)?;
+    let seed = args.seed.read()?;
     let index = PqrIndex::load(&args.index, &seed)?;
     let (queries, shape) = read_npy_f32(&args.queries)?;
     let dim = index.dim();
@@ -242,13 +244,13 @@ fn query(args: QueryArgs) -> CliResult<i32> {
 }
 
 fn run_audit(args: AuditArgs) -> CliResult<i32> {
-    let seed = read_seed(&args.seed_file)?;
+    let seed = args.seed.read()?;
     let mut index = PqrIndex::load(&args.index, &seed)?;
     let (queries, shape) = read_npy_f32(&args.queries)?;
     validate_queries(&queries, &shape, index.dim())?;
     let target = Target::new(args.k, args.tau, args.delta)?;
     let master_seed = match &args.audit_seed_file {
-        Some(path) => read_seed(path)?,
+        Some(path) => read_seed_path(path)?,
         None => *blake3::hash(&[b"pqr.guard.audit.master".as_slice(), seed.as_slice()].concat())
             .as_bytes(),
     };
@@ -274,8 +276,8 @@ struct BenchReport {
     repeat: usize,
     pqr_p50_ms: f64,
     pqr_p95_ms: f64,
-    brute_p50_ms: f64,
-    speedup_over_brute: f64,
+    brute_p50_ms: Option<f64>,
+    speedup_over_brute: Option<f64>,
     hnsw_p50_ms: Option<f64>,
     hnsw_p95_ms: Option<f64>,
     hnsw_ef_search: Option<usize>,
@@ -285,10 +287,12 @@ struct BenchReport {
 }
 
 fn bench(args: BenchArgs) -> CliResult<i32> {
-    if args.baseline != "brute" && args.baseline != "usearch-hnsw" {
-        return Err(config_error("baseline must be brute or usearch-hnsw"));
+    if args.baseline != "brute" && args.baseline != "usearch-hnsw" && args.baseline != "none" {
+        return Err(config_error(
+            "baseline must be brute, usearch-hnsw, or none",
+        ));
     }
-    let seed = read_seed(&args.seed_file)?;
+    let seed = args.seed.read()?;
     let index = PqrIndex::load(&args.index, &seed)?;
     let (queries, shape) = read_npy_f32(&args.queries)?;
     let dim = index.dim();
@@ -312,23 +316,25 @@ fn bench(args: BenchArgs) -> CliResult<i32> {
             let t = Instant::now();
             let _ = index.query(q, &opts)?;
             pqr.push(t.elapsed().as_secs_f64() * 1000.0);
-            let t = Instant::now();
-            let _ = brute_top(&index, q, args.k);
-            brute.push(t.elapsed().as_secs_f64() * 1000.0);
+            if args.baseline == "brute" {
+                let t = Instant::now();
+                let _ = brute_top(&index, q, args.k);
+                brute.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
         }
     }
     pqr.sort_by(f64::total_cmp);
     brute.sort_by(f64::total_cmp);
     let p50 = pqr[pqr.len() / 2];
     let p95 = pqr[(pqr.len() * 95 / 100).min(pqr.len() - 1)];
-    let b50 = brute[brute.len() / 2];
+    let b50 = (!brute.is_empty()).then(|| brute[brute.len() / 2]);
     let mut hnsw_p50 = None;
     let mut hnsw_p95 = None;
     let mut hnsw_ef = None;
     let mut hnsw_recall = None;
     let mut ratio = None;
     if args.baseline == "usearch-hnsw" {
-        let hnsw = build_hnsw(&index)?;
+        let hnsw = build_hnsw(&index, args.hnsw_cache.as_deref())?;
         let truth: Vec<Vec<u64>> = (0..nq)
             .map(|qi| brute_top(&index, &queries[qi * dim..(qi + 1) * dim], args.k))
             .collect();
@@ -383,7 +389,7 @@ fn bench(args: BenchArgs) -> CliResult<i32> {
         pqr_p50_ms: p50,
         pqr_p95_ms: p95,
         brute_p50_ms: b50,
-        speedup_over_brute: b50 / p50,
+        speedup_over_brute: b50.map(|b| b / p50),
         hnsw_p50_ms: hnsw_p50,
         hnsw_p95_ms: hnsw_p95,
         hnsw_ef_search: hnsw_ef,
@@ -399,7 +405,7 @@ fn bench(args: BenchArgs) -> CliResult<i32> {
     Ok(0)
 }
 
-fn build_hnsw(index: &PqrIndex) -> CliResult<usearch::Index> {
+fn build_hnsw(index: &PqrIndex, cache: Option<&Path>) -> CliResult<usearch::Index> {
     use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
     let options = IndexOptions {
         dimensions: index.dim(),
@@ -411,11 +417,25 @@ fn build_hnsw(index: &PqrIndex) -> CliResult<usearch::Index> {
         multi: false,
     };
     let hnsw = Index::new(&options)?;
+    if let Some(path) = cache {
+        if path.exists() {
+            if let Some(text) = path.to_str() {
+                if hnsw.load(text).is_ok() {
+                    return Ok(hnsw);
+                }
+            }
+        }
+    }
     hnsw.reserve(index.len())?;
     let dim = index.dim();
     let vectors = index.vectors();
     for id in 0..index.len() {
         hnsw.add(id as u64, &vectors[id * dim..(id + 1) * dim])?;
+    }
+    if let Some(path) = cache {
+        if let Some(text) = path.to_str() {
+            hnsw.save(text)?;
+        }
     }
     Ok(hnsw)
 }
@@ -446,14 +466,74 @@ fn validate_queries(queries: &[f32], shape: &[usize], dim: usize) -> CliResult<u
     Ok(queries.len() / dim)
 }
 
-fn read_seed(path: &Path) -> CliResult<[u8; 32]> {
-    let bytes = fs::read(path)?;
-    if bytes.len() != 32 {
-        return Err(config_error("seed file must contain exactly 32 bytes"));
+#[derive(clap::Args)]
+struct SeedArgs {
+    #[arg(long, group = "seed", value_name = "PATH")]
+    seed_file: Option<PathBuf>,
+    #[arg(long, group = "seed", value_name = "VAR")]
+    seed_env: Option<String>,
+    #[arg(long, group = "seed", value_name = "CMD")]
+    seed_command: Option<String>,
+}
+
+impl SeedArgs {
+    fn read(&self) -> CliResult<[u8; 32]> {
+        if let Some(path) = &self.seed_file {
+            return read_seed_path(path);
+        }
+        if let Some(name) = &self.seed_env {
+            let value = std::env::var(name)
+                .map_err(|_| config_error("seed environment variable is not set"))?;
+            return decode_seed(value.as_bytes(), true);
+        }
+        if let Some(command) = &self.seed_command {
+            let output = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(command)
+                .output()
+                .map_err(|_| config_error("seed command failed to start"))?;
+            if !output.status.success() {
+                return Err(config_error("seed command failed"));
+            }
+            return decode_seed(&output.stdout, true);
+        }
+        Err(config_error(
+            "one of --seed-file, --seed-env, or --seed-command is required",
+        ))
     }
+}
+
+fn read_seed_path(path: &Path) -> CliResult<[u8; 32]> {
+    decode_seed(&fs::read(path)?, false)
+}
+
+fn decode_seed(bytes: &[u8], trim: bool) -> CliResult<[u8; 32]> {
+    let bytes = if trim { bytes.trim_ascii() } else { bytes };
     let mut seed = [0u8; 32];
-    seed.copy_from_slice(&bytes);
-    Ok(seed)
+    if bytes.len() == 32 {
+        seed.copy_from_slice(bytes);
+        return Ok(seed);
+    }
+    if bytes.len() == 64 {
+        for (i, slot) in seed.iter_mut().enumerate() {
+            let hi = hex_digit(bytes[i * 2])?;
+            let lo = hex_digit(bytes[i * 2 + 1])?;
+            *slot = (hi << 4) | lo;
+        }
+        return Ok(seed);
+    }
+    Err(config_error(
+        "seed must be 32 raw bytes or 64 hex characters",
+    ))
+}
+
+fn hex_digit(byte: u8) -> CliResult<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(config_error("seed hex contains a non-hex character")),
+    }
 }
 
 fn parse_stages(spec: &str, dim: usize) -> CliResult<Vec<usize>> {
@@ -494,4 +574,27 @@ fn read_npy_i64(path: &Path) -> CliResult<Vec<u64>> {
     let npy = npyz::NpyFile::new(std::io::Cursor::new(bytes))?;
     let data = npy.into_vec::<i64>()?;
     Ok(data.into_iter().map(|v| v as u64).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seed_decoder_accepts_raw_and_hex() {
+        let raw = [7u8; 32];
+        assert_eq!(decode_seed(&raw, false).unwrap(), raw);
+        let hex: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(decode_seed(hex.as_bytes(), true).unwrap(), raw);
+        assert!(decode_seed(b"short", true).is_err());
+        assert!(decode_seed(&[b'z'; 64], true).is_err());
+    }
+
+    #[test]
+    fn query_shape_must_match_index() {
+        let data = vec![0f32; 128];
+        assert_eq!(validate_queries(&data, &[1, 128], 128).unwrap(), 1);
+        assert!(validate_queries(&data, &[2, 64], 128).is_err());
+        assert!(validate_queries(&[], &[0, 128], 128).is_err());
+    }
 }
