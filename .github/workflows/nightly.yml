@@ -1,0 +1,29 @@
+name: Nightly audit
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy
+      - name: Generate certified fixture
+        run: |
+          python -c "import numpy as np; rng=np.random.default_rng(7); n,d=1000,16; X=(rng.normal(size=(n,d))+np.array([[1,0]*(d//2)])).astype(np.float32); np.save('nightly.npy',X); np.save('nightly_q.npy',X[:10]); open('nightly.seed','wb').write(bytes(range(32)))"
+      - name: Build and audit
+        run: |
+          cargo run --release --bin pqrguard -- build \
+            --vectors nightly.npy --partitions 10 --code-bits 8,16 \
+            --seed-file nightly.seed --out nightly.idx
+          cargo run --release --bin pqrguard -- audit \
+            --index nightly.idx --queries nightly_q.npy --seed-file nightly.seed \
+            --k 10 --tau 1 --delta 0.1 --rotations 1000 --nprobe 3 \
+            --report nightly.audit.json

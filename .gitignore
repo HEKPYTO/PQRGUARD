@@ -1,0 +1,14 @@
+/target/
+/fixtures/
+/research/
+/docs/
+/.[!.]*/
+!/.github/
+!/.github/**
+/*.json
+*.md
+!README.md
+!**/README.md
+NOTICE
+CHANGELOG
+.DS_Store
