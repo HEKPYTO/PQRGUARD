@@ -25,7 +25,7 @@ that pass all stages are re-ranked with exact fp64 distances.
 - Per-query certificate JSON with theorem, budget, stages, assumptions, status.
 - Fresh-rotation audit with pooled and per-query Clopper-Pearson gates.
 - USearch HNSW benchmark baseline; PQR never certifies a graph result.
-- Seed custody: the index stores only a BLAKE3 commitment to the 32-byte seed.
+- Seed custody: file, environment, or KMS-command source; the index stores only a BLAKE3 commitment to the 32-byte seed.
 - Degraded paths for adaptive queries, public seeds, filtered search, and
   approximate re-ranking; a degraded result never carries a certificate.
 
@@ -95,8 +95,12 @@ Single-thread latency on Apple M2, SIFT10k, 100 queries, k=10, nprobe=2:
 | Throughput vs exact brute force | 5.42x | - | - | - |
 
 The paper reports 2.5x HNSW with AVX-512 C++ kernels. This portable Rust v0.1
-uses scalar CRC-style popcount paths and byte lookup tables; its measured ratio
-is 3.95x on the fixture above. Larger scales may widen the ratio.
+uses byte lookup tables and an in-memory scan; its measured ratio is 3.95x on
+SIFT10k. On SIFT1M (100 partitions, one 128-bit stage) the build took 83 s; a
+certified query took 42.15 ms p50 versus 0.209 ms for USearch HNSW at recall
+1.000, a ratio of 201.6x. The 4x gate is **not met at 1M**. A 100M run needs a
+disk-backed build: 100M x 128 fp32 is 51.2 GB of raw vectors against 24 GB of
+host RAM, and the public SIFT bundle stops at 1M.
 
 ## Development
 
