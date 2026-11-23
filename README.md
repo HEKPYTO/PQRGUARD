@@ -84,6 +84,7 @@ SIFT10k (10,000 x 128, 100 queries, k=10, tau=1, delta=0.01):
 |---|---|
 | Certified query exactness | 100/100 queries equal brute force |
 | Fresh-rotation audit, 64 rotations, delta=0.05 | 17 failures / 6,400 trials = 0.266%, pooled gate pass |
+| SIFT1M audit, 10 queries, 64 rotations, delta=0.05 | 0 failures / 640 trials, CP upper 0.0457, pooled pass |
 | Audit inference | falsification-only |
 
 Single-thread latency on Apple M2, SIFT10k, 100 queries, k=10, nprobe=2:
