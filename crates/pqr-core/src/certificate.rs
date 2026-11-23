@@ -7,9 +7,9 @@ pub const SCHEMA: &str = "pqr.guard/v0.1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Target {
-    pub k: usize,
-    pub tau: f64,
-    pub delta: f64,
+    pub(crate) k: usize,
+    pub(crate) tau: f64,
+    pub(crate) delta: f64,
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -37,6 +37,18 @@ impl Target {
         }
         beta_for(tau, k, delta)?;
         Ok(Self { k, tau, delta })
+    }
+
+    pub fn k(&self) -> usize {
+        self.k
+    }
+
+    pub fn tau(&self) -> f64 {
+        self.tau
+    }
+
+    pub fn delta(&self) -> f64 {
+        self.delta
     }
 
     pub fn beta(&self) -> f64 {

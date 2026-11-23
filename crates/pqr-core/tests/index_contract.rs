@@ -162,7 +162,7 @@ fn audit_is_falsification_only_and_reports_trials() {
     assert_eq!(report.trials, 20 * 100);
     assert_eq!(report.inference, "falsification-only");
     assert_eq!(report.verdict, "pass");
-    assert!(report.failure_rate <= target.delta);
+    assert!(report.failure_rate <= target.delta());
 }
 
 #[test]
