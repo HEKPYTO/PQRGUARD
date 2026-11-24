@@ -1,11 +1,11 @@
 use std::fmt;
-use std::fs;
 use std::io;
 use std::path::Path;
 
 use thiserror::Error;
 use zeroize::Zeroizing;
 
+const MAX_SEED_FILE_BYTES: u64 = 128;
 pub type SeedBytes = [u8; 32];
 
 #[derive(Clone)]
@@ -68,21 +68,38 @@ impl Seed {
     }
 
     pub fn from_file(path: &Path) -> Result<Self, SeedError> {
+        let file = crate::fileio::open_no_follow(path).map_err(|error| {
+            if crate::fileio::is_symlink_error(&error) {
+                SeedError::Symlink
+            } else {
+                SeedError::Io(error)
+            }
+        })?;
+        let metadata = file.metadata()?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let meta = fs::symlink_metadata(path)?;
-            if meta.file_type().is_symlink() {
-                return Err(SeedError::Symlink);
-            }
-            if meta.permissions().mode() & 0o077 != 0 {
+            if metadata.permissions().mode() & 0o077 != 0 {
                 return Err(SeedError::Permissions);
             }
-            if meta.len() > 64 {
-                return Err(SeedError::TooLarge);
-            }
         }
-        Self::parse(&fs::read(path)?, false)
+        if metadata.len() > MAX_SEED_FILE_BYTES {
+            return Err(SeedError::TooLarge);
+        }
+        let bytes = Zeroizing::new(
+            crate::fileio::read_limited(&file, MAX_SEED_FILE_BYTES).map_err(|error| {
+                if error.kind() == io::ErrorKind::InvalidData {
+                    SeedError::TooLarge
+                } else {
+                    SeedError::Io(error)
+                }
+            })?,
+        );
+        match Self::parse(bytes.as_slice(), false) {
+            Ok(seed) => Ok(seed),
+            Err(SeedError::Length) => Self::parse(bytes.as_slice().trim_ascii(), false),
+            Err(error) => Err(error),
+        }
     }
 
     pub fn from_env(name: &str) -> Result<Self, SeedError> {

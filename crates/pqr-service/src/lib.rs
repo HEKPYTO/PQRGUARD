@@ -115,14 +115,7 @@ impl Config {
 
     pub fn seed(&self) -> Result<Seed, Error> {
         if let Some(path) = &self.seed_file {
-            return Ok(match Seed::from_file(path) {
-                Ok(seed) => seed,
-                Err(SeedError::Length | SeedError::TooLarge) => {
-                    let bytes = std::fs::read(path)?;
-                    Seed::parse(bytes.trim_ascii(), false)?
-                }
-                Err(error) => return Err(error.into()),
-            });
+            return Ok(Seed::from_file(path)?);
         }
         if let Some(name) = &self.seed_env {
             return Ok(Seed::from_env(name)?);
