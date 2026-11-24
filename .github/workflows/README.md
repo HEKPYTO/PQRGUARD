@@ -2,12 +2,12 @@
 
 ## Permissions and pinning
 
-All workflows use `permissions: contents: read` by default. Only the release
+All workflows use `permissions: contents: read` by default. The release
 `package` job escalates to `attestations: write` and `id-token: write` for
-build provenance and keyless signing. No secrets are used. Every `uses` step
-is pinned to a full commit SHA; the trailing comment names the release tag.
-Checkouts set `persist-credentials: false`, and all Cargo build/test commands
-use `--locked`.
+build provenance and keyless signing; the `publish` job gets `contents: write`
+to create a GitHub Release. No secrets are used. Every `uses` step is pinned
+to a full commit SHA. Checkouts set `persist-credentials: false`, and all
+Cargo build/test commands use `--locked`.
 
 ## Workflows
 
@@ -28,22 +28,30 @@ use `--locked`.
   publishes `pqr-binaries-<target>` with both binaries and one SBOM per binary.
   The `package` job downloads both artifacts and publishes `release-assets`
   containing four binaries, four SBOMs, `Cargo.lock`, `SHA256SUMS`, and one
-  Sigstore bundle (`*.sigstore.json`) per file. GitHub build provenance
-  attestations are attached to the workflow run, not to a GitHub Release.
+  Sigstore bundle (`*.sigstore.json`) per file. On `v*` tags the `publish` job
+  downloads `release-assets` and creates a GitHub Release with those assets.
+  `workflow_dispatch` only publishes workflow artifacts. GitHub build
+  provenance attestations stay attached to the workflow run, not the Release.
 
 ## Verify a release artifact
 
-Download `release-assets` from the workflow run and unpack it into `dist/`.
-Replace `HEKPYTO/PQRGUARD` with the repository if using a fork.
+Download the assets from the GitHub Release into `dist/`. Replace
+`HEKPYTO/PQRGUARD` with the repository if using a fork.
 
-1. Checksums:
+1. Download the assets from the GitHub Release:
+
+   ```sh
+   gh release download <tag> --repo HEKPYTO/PQRGUARD --dir dist
+   ```
+
+2. Checksums:
 
    ```sh
    cd dist
    sha256sum -c SHA256SUMS
    ```
 
-2. Keyless Sigstore signatures (bundles contain the signature, certificate,
+3. Keyless Sigstore signatures (bundles contain the signature, certificate,
    and transparency-log proof):
 
    ```sh
@@ -56,7 +64,7 @@ Replace `HEKPYTO/PQRGUARD` with the repository if using a fork.
    done
    ```
 
-3. GitHub build provenance:
+4. GitHub build provenance:
 
    ```sh
    for file in pqrguard-x86_64-unknown-linux-gnu pqr-serve-x86_64-unknown-linux-gnu \
@@ -66,7 +74,7 @@ Replace `HEKPYTO/PQRGUARD` with the repository if using a fork.
        --signer-workflow HEKPYTO/PQRGUARD/.github/workflows/release.yml
    done
 
-4. SBOM contents:
+5. SBOM contents:
 
    ```sh
    jq -r '.bomFormat, .specVersion, .metadata.component.name' dist/sbom-*.cdx.json
