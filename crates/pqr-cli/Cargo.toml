@@ -17,3 +17,6 @@ serde_json.workspace = true
 npyz.workspace = true
 blake3.workspace = true
 usearch = "2.26"
+
+[dev-dependencies]
+tempfile.workspace = true

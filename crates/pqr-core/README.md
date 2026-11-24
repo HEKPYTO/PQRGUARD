@@ -11,7 +11,7 @@ Core library for PQR-GUARD: Beta-quantile certificate math, Haar rotation,
 | `rotation` | Haar-random orthogonal matrix from Gaussian QR with sign correction; `P^T` application. |
 | `code` | 1-bit code, prefix statistics `a`, `b`, `kappa`, prune predicate. |
 | `index` | IVF k-means, residual encoding, packed codes, staged scan, adaptive radius, save/load. |
-| `certificate` | Target validation, certificate and degraded records, schema `pqr.guard/v0.1`. |
+| `certificate` | Target validation, certificate and degraded records, `Certificate::verify` recomputation, schema `pqr.guard/v0.1`. |
 | `audit` | Fresh-rotation replay, recall comparison, pooled and per-query gates. |
 | `control` | Proposition 1 positive control placement. |
 
@@ -44,6 +44,8 @@ fp64 distance, and the radius shrinks to the k-th exact candidate distance.
 - `k > n_live` is an error, never a degraded certificate.
 - Degraded records carry no claim and cannot be upgraded.
 - The index stores a BLAKE3 seed commitment, never the seed.
+- Verification checks the claim against the target fields; it is not a signature
+  and does not authenticate the producer or the assumptions.
 - L2 only; no inner-product path.
 
 ## Testing

@@ -22,7 +22,8 @@ that pass all stages are re-ranked with exact fp64 distances.
 - Exact Beta-quantile pruning thresholds; no normal approximation.
 - IVF, Haar rotation, 1-bit prefix codes, triangle-inequality filter, adaptive
   radius, staged scan.
-- Per-query certificate JSON with theorem, budget, stages, assumptions, status.
+- Per-query certificate JSON with theorem, budget, stages, assumptions, status;
+  `verify --certificates` checks claim self-consistency.
 - Fresh-rotation audit with pooled and per-query Clopper-Pearson gates.
 - USearch HNSW benchmark baseline; PQR never certifies a graph result.
 - Seed custody: file, environment, or KMS-command source; the index stores only a BLAKE3 commitment to the 32-byte seed.
@@ -63,6 +64,11 @@ cargo run --release --bin pqr-guard -- bench \
 
 `certificates` is JSONL: one certified or degraded record per query. `query`
 exits `2` when any query is degraded, and `audit` exits `3` when the gate fails.
+
+`pqr-guard verify --certificates certs.jsonl` checks each JSONL line and prints
+a JSON summary. It exits `2` if any line is invalid, including degraded records
+and certificates with edited fields. Verification is self-consistency only: it
+does not authenticate who produced the certificate, and v0.1 has no signature.
 
 ## Results
 
@@ -162,6 +168,9 @@ CI runs format, clippy, and the release test suite. The nightly workflow runs a
   cosine similarity; the certificate remains an L2 statement.
 - A seed commitment is not a secret-sharing scheme. Use 32 random bytes and
   keep them in the chosen custody source.
+- Certificate verification recomputes the claim from the target fields. It does
+  not attest to the stated assumptions or the producer's identity; there is no
+  signature in v0.1.
 
 ## License
 

@@ -2,13 +2,14 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::certificate::Target;
-use crate::index::{IndexError, PqrIndex, QueryOptions};
+use crate::index::{distance_then_id, IndexError, PqrIndex, QueryOptions};
+use crate::seed::Seed;
 
 #[derive(Debug, Clone)]
 pub struct AuditConfig {
     pub rotations: u64,
     pub nprobe: usize,
-    pub master_seed: [u8; 32],
+    pub master_seed: Seed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +48,8 @@ pub enum AuditError {
     Queries,
     #[error("ground truth shape does not match queries and k")]
     GroundTruth,
+    #[error("rotations must be positive")]
+    Rotations,
 }
 
 pub fn clopper_pearson_upper(failures: u64, trials: u64) -> f64 {
@@ -60,12 +63,12 @@ pub fn clopper_pearson_upper(failures: u64, trials: u64) -> f64 {
         .unwrap_or(1.0)
 }
 
-fn rotation_seed(master: &[u8; 32], rotation: u64) -> [u8; 32] {
+fn rotation_seed(master: &Seed, rotation: u64) -> Seed {
     let mut h = blake3::Hasher::new();
     h.update(b"pqr.guard.audit.rotation");
-    h.update(master);
+    h.update(master.as_bytes());
     h.update(&rotation.to_le_bytes());
-    *h.finalize().as_bytes()
+    Seed::from_bytes(*h.finalize().as_bytes())
 }
 
 pub fn audit(
@@ -95,14 +98,14 @@ pub fn audit(
         }
     };
     if cfg.rotations == 0 {
-        return Err(AuditError::GroundTruth);
+        return Err(AuditError::Rotations);
     }
     let original_id = index.index_id().to_string();
     let reasons = Vec::new();
     let mut failures = vec![0u64; nq];
     for rotation in 0..cfg.rotations {
         let seed = rotation_seed(&cfg.master_seed, rotation);
-        index.reencode(&seed);
+        index.reencode(seed.as_bytes());
         let stage_eps = index.stage_eps(&target)?;
         for qi in 0..nq {
             let q = &queries[qi * dim..(qi + 1) * dim];
@@ -192,7 +195,7 @@ fn brute_truth(vectors: &[f32], dim: usize, queries: &[f32], nq: usize, k: usize
                 (s, id as u64)
             })
             .collect();
-        all.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        all.sort_unstable_by(distance_then_id);
         out.extend(all.into_iter().take(k).map(|(_, id)| id));
     }
     out

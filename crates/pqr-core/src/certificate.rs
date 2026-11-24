@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -5,7 +7,7 @@ use crate::math::{beta_for, misses_allowed, MathError};
 
 pub const SCHEMA: &str = "pqr.guard/v0.1";
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Target {
     pub(crate) k: usize,
     pub(crate) tau: f64,
@@ -65,6 +67,7 @@ impl Target {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Claim {
     #[serde(rename = "type")]
     pub kind: String,
@@ -99,7 +102,38 @@ pub enum DegradedReason {
     SeedMismatch,
 }
 
+#[derive(Debug, Error, PartialEq)]
+pub enum CertificateError {
+    #[error("unexpected certificate schema")]
+    Schema,
+    #[error("certificate status is not certified")]
+    Status,
+    #[error("dimension must be at least 3")]
+    Dimension,
+    #[error("stages must be nonempty, strictly increasing, and within dim")]
+    Stages,
+    #[error(transparent)]
+    Target(#[from] TargetError),
+    #[error("non-finite claim value")]
+    NonFinite,
+    #[error("claim kind mismatch")]
+    ClaimKind,
+    #[error("claim theorem mismatch")]
+    ClaimTheorem,
+    #[error("claim beta mismatch")]
+    ClaimBeta,
+    #[error("claim m_allowed mismatch")]
+    ClaimMAllowed,
+    #[error("claim probability space mismatch")]
+    ClaimProbabilitySpace,
+    #[error("claim expected recall mismatch")]
+    ClaimExpectedRecall,
+    #[error("assumption set mismatch")]
+    Assumptions,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Certificate {
     pub schema: String,
     pub index_id: String,
@@ -144,6 +178,65 @@ impl Certificate {
             ],
             status: Status::Certified,
         }
+    }
+
+    pub fn verify(&self) -> Result<(), CertificateError> {
+        if self.schema != SCHEMA {
+            return Err(CertificateError::Schema);
+        }
+        if self.status != Status::Certified {
+            return Err(CertificateError::Status);
+        }
+        if self.dim < 3 {
+            return Err(CertificateError::Dimension);
+        }
+        if self.stages.is_empty()
+            || self
+                .stages
+                .iter()
+                .any(|s| s.m_bits == 0 || s.m_bits > self.dim)
+            || self.stages.windows(2).any(|w| w[0].m_bits >= w[1].m_bits)
+        {
+            return Err(CertificateError::Stages);
+        }
+        let target = Target::new(self.k, self.tau, self.delta)?;
+        if !self.claim.beta.is_finite() || !self.claim.expected_recall.is_finite() {
+            return Err(CertificateError::NonFinite);
+        }
+        if self.claim.kind != "per_query_recall" {
+            return Err(CertificateError::ClaimKind);
+        }
+        let theorem = if target.tau >= 1.0 { "Thm2" } else { "Thm3" };
+        if self.claim.theorem != theorem {
+            return Err(CertificateError::ClaimTheorem);
+        }
+        if self.claim.beta != target.beta() {
+            return Err(CertificateError::ClaimBeta);
+        }
+        if self.claim.m_allowed != target.m_allowed() {
+            return Err(CertificateError::ClaimMAllowed);
+        }
+        if self.claim.probability_space != "secret_random_rotation_P" {
+            return Err(CertificateError::ClaimProbabilitySpace);
+        }
+        if self.claim.expected_recall != target.expected_recall() {
+            return Err(CertificateError::ClaimExpectedRecall);
+        }
+        let expected = [
+            "queries_independent_of_P",
+            "updates_independent_of_P",
+            "seed_secret",
+            "nonadaptive",
+            "target_fixed_before_execution",
+        ];
+        let actual: BTreeSet<&str> = self.assumptions.iter().map(String::as_str).collect();
+        if self.assumptions.len() != expected.len()
+            || actual.len() != expected.len()
+            || !expected.iter().all(|a| actual.contains(*a))
+        {
+            return Err(CertificateError::Assumptions);
+        }
+        Ok(())
     }
 }
 
