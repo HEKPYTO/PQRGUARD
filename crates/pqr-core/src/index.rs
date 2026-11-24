@@ -176,6 +176,12 @@ pub struct PqrIndex {
     coeff_a: Vec<f64>,
     coeff_k: Vec<f64>,
     coeff_c: Vec<f64>,
+    scan_norms: Vec<f32>,
+    scan_codes: Vec<u64>,
+    scan_a: Vec<f64>,
+    scan_k: Vec<f64>,
+    scan_c: Vec<f64>,
+    scan_ids: Vec<u32>,
     rotation: Rotation,
     seed_commitment: String,
     index_id: String,
@@ -237,11 +243,18 @@ impl PqrIndex {
             coeff_a: vec![0f64; n * stages_len],
             coeff_k: vec![0f64; n * stages_len],
             coeff_c: vec![0f64; n * stages_len],
+            scan_norms: Vec::new(),
+            scan_codes: Vec::new(),
+            scan_a: Vec::new(),
+            scan_k: Vec::new(),
+            scan_c: Vec::new(),
+            scan_ids: Vec::new(),
             rotation: Rotation::from_seed(dim, seed),
             seed_commitment: hex(&blake3::hash(seed)),
             index_id: String::new(),
         };
         index.encode_all();
+        index.build_scan_layout();
         index.index_id = index.compute_id();
         let receipt = BuildReceipt {
             index_id: index.index_id.clone(),
@@ -258,6 +271,7 @@ impl PqrIndex {
         self.rotation = Rotation::from_seed(self.dim, seed);
         self.seed_commitment = hex(&blake3::hash(seed));
         self.encode_all();
+        self.build_scan_layout();
         self.index_id = self.compute_id();
     }
 
@@ -363,6 +377,58 @@ impl PqrIndex {
         }
     }
 
+    fn build_scan_layout(&mut self) {
+        let n = self.n;
+        let words = self.words;
+        let shares = self.stages.len();
+        let mut norms = vec![0f32; n];
+        let mut codes = vec![0u64; n * words];
+        let mut a = vec![0f64; n * shares];
+        let mut k = vec![0f64; n * shares];
+        let mut c = vec![0f64; n * shares];
+        for (slot, &idu) in self.order.iter().enumerate() {
+            let id = idu as usize;
+            norms[slot] = self.norms[id];
+            codes[slot * words..(slot + 1) * words]
+                .copy_from_slice(&self.codes[id * words..(id + 1) * words]);
+            for l in 0..shares {
+                a[slot * shares + l] = self.coeff_a[id * shares + l];
+                k[slot * shares + l] = self.coeff_k[id * shares + l];
+                c[slot * shares + l] = self.coeff_c[id * shares + l];
+            }
+        }
+        let mut sorted_norms = vec![0f32; n];
+        let mut sorted_codes = vec![0u64; n * words];
+        let mut sorted_a = vec![0f64; n * shares];
+        let mut sorted_k = vec![0f64; n * shares];
+        let mut sorted_c = vec![0f64; n * shares];
+        let mut ids = vec![0u32; n];
+        for p in 0..self.partitions {
+            let begin = self.starts[p] as usize;
+            let end = self.starts[p + 1] as usize;
+            let mut slots: Vec<usize> = (begin..end).collect();
+            slots.sort_unstable_by(|&a, &b| norms[a].total_cmp(&norms[b]));
+            for (offset, &src) in slots.iter().enumerate() {
+                let dst = begin + offset;
+                sorted_norms[dst] = norms[src];
+                sorted_codes[dst * words..(dst + 1) * words]
+                    .copy_from_slice(&codes[src * words..(src + 1) * words]);
+                for l in 0..shares {
+                    sorted_a[dst * shares + l] = a[src * shares + l];
+                    sorted_k[dst * shares + l] = k[src * shares + l];
+                    sorted_c[dst * shares + l] = c[src * shares + l];
+                }
+                ids[dst] = self.order[src];
+            }
+        }
+        self.scan_norms = sorted_norms;
+        self.scan_codes = sorted_codes;
+        self.scan_a = sorted_a;
+        self.scan_k = sorted_k;
+        self.scan_c = sorted_c;
+        self.scan_ids = ids;
+    }
+
     pub fn query(&self, q: &[f32], opts: &QueryOptions) -> Result<QueryOutcome, IndexError> {
         if q.len() != self.dim {
             return Err(IndexError::Dimension);
@@ -429,10 +495,19 @@ impl PqrIndex {
                 continue;
             }
             let phi = phi2[p].sqrt();
-            let slice = &self.order[self.starts[p] as usize..self.starts[p + 1] as usize];
-            for &idu in slice {
-                let id = idu as usize;
-                let x = self.norms[id] as f64;
+            let begin = self.starts[p] as usize;
+            let end = self.starts[p + 1] as usize;
+            let (lo, hi) = if r2.is_finite() {
+                let sub = &self.scan_norms[begin..end];
+                let low = begin + sub.partition_point(|x| (*x as f64) < phi - r);
+                let high = begin + sub.partition_point(|x| (*x as f64) <= phi + r);
+                (low, high)
+            } else {
+                (begin, end)
+            };
+            for slot in lo..hi {
+                let id = self.scan_ids[slot] as usize;
+                let x = self.scan_norms[slot] as f64;
                 if r2.is_finite() && (x - phi).abs() > r {
                     continue;
                 }
@@ -446,20 +521,20 @@ impl PqrIndex {
                     }
                     continue;
                 }
-                let base = id * self.words;
-                let cbase = id * shares;
+                let base = slot * self.words;
+                let cbase = slot * shares;
                 let theta = (x * x + phi * phi - r * r) / (2.0 * x * phi);
                 let mut pruned = false;
                 for l in 0..shares {
-                    let a = self.coeff_a[cbase + l];
+                    let a = self.scan_a[cbase + l];
                     if a <= 0.0 {
                         continue;
                     }
-                    let dot = fast[l].dot(&self.codes, base);
+                    let dot = fast[l].dot(&self.scan_codes, base);
                     let mut b = dot * inv_sqrt;
-                    b -= self.coeff_c[cbase + l];
+                    b -= self.scan_c[cbase + l];
                     b /= phi;
-                    let kappa = self.coeff_k[cbase + l];
+                    let kappa = self.scan_k[cbase + l];
                     let slack =
                         (1.0 - theta.max(0.0) * theta.max(0.0)).sqrt() * (1.0 + 1e-9) + 1e-12;
                     if b / a + slack * kappa * eps[l] < theta {
@@ -613,6 +688,12 @@ impl PqrIndex {
             coeff_a,
             coeff_k,
             coeff_c,
+            scan_norms: Vec::new(),
+            scan_codes: Vec::new(),
+            scan_a: Vec::new(),
+            scan_k: Vec::new(),
+            scan_c: Vec::new(),
+            scan_ids: Vec::new(),
             rotation: Rotation::from_seed(dim, seed),
             seed_commitment: manifest.seed_commitment,
             index_id: manifest.index_id.clone(),
@@ -620,6 +701,7 @@ impl PqrIndex {
         if index.compute_id() != manifest.index_id {
             return Err(IndexError::Checksum);
         }
+        index.build_scan_layout();
         index.index_id = manifest.index_id;
         Ok(index)
     }
