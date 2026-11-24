@@ -436,6 +436,73 @@ impl PqrIndex {
         self.scan_ids = ids;
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn scan_partition(
+        &self,
+        p: usize,
+        phi: f64,
+        r: &mut f64,
+        candidates: &mut Vec<(f64, u32)>,
+        fast: &[FastStage],
+        eps: &[f64],
+        inv_sqrt: f64,
+        q64: &[f64],
+        k: usize,
+        shares: usize,
+    ) {
+        let begin = self.starts[p] as usize;
+        let end = self.starts[p + 1] as usize;
+        let (lower, upper) = scan_window(phi, *r);
+        let sub = &self.scan_norms[begin..end];
+        let lo = begin + sub.partition_point(|x| (*x as f64) < lower);
+        let hi = begin + sub.partition_point(|x| (*x as f64) <= upper);
+        for slot in lo..hi {
+            let r2 = *r * *r;
+            let id = self.scan_ids[slot] as usize;
+            let x = self.scan_norms[slot] as f64;
+            if r2.is_finite() && (x - phi).abs() > *r {
+                continue;
+            }
+            let need_exact = x == 0.0 || phi == 0.0 || !r2.is_finite();
+            if need_exact {
+                let d = exact_distance2(&self.vectors, id, self.dim, q64);
+                push_candidate(candidates, d, id as u32, k);
+                if candidates.len() >= k {
+                    *r = candidates[k - 1].0.sqrt();
+                }
+                continue;
+            }
+            let base = slot * self.words;
+            let cbase = slot * shares;
+            let theta = (x * x + phi * phi - r2) / (2.0 * x * phi);
+            let mut pruned = false;
+            for l in 0..shares {
+                let a = self.scan_a[cbase + l];
+                if a <= 0.0 {
+                    continue;
+                }
+                let dot = fast[l].dot(&self.scan_codes, base);
+                let mut b = dot * inv_sqrt;
+                b -= self.scan_c[cbase + l];
+                b /= phi;
+                let kappa = self.scan_k[cbase + l];
+                let slack = (1.0 - theta.max(0.0) * theta.max(0.0)).sqrt() * (1.0 + 1e-9) + 1e-12;
+                if b / a + slack * kappa * eps[l] < theta {
+                    pruned = true;
+                    break;
+                }
+            }
+            if pruned {
+                continue;
+            }
+            let d = exact_distance2(&self.vectors, id, self.dim, q64);
+            push_candidate(candidates, d, id as u32, k);
+            if candidates.len() >= k {
+                *r = candidates[k - 1].0.sqrt();
+            }
+        }
+    }
+
     pub fn query(&self, q: &[f32], opts: &QueryOptions) -> Result<QueryOutcome, IndexError> {
         if q.len() != self.dim {
             return Err(IndexError::Dimension);
@@ -479,7 +546,7 @@ impl PqrIndex {
                 push_candidate(&mut candidates, d, id as u32, k);
             }
         }
-        let mut r2 = if candidates.len() >= k {
+        let r2 = if candidates.len() >= k {
             candidates[k - 1].0
         } else {
             f64::INFINITY
