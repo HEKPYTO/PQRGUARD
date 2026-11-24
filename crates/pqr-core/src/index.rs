@@ -130,13 +130,33 @@ impl FastStage {
     }
 
     fn dot(&self, codes: &[u64], base: usize) -> f64 {
-        let mut sum = 0.0;
-        for (byte, table) in self.tables.iter().enumerate() {
-            let word = codes[base + byte / 8];
-            let pattern = ((word >> ((byte % 8) * 8)) & 0xff) as usize;
-            sum += table[pattern];
+        let mut s0 = 0.0f64;
+        let mut s1 = 0.0f64;
+        let mut s2 = 0.0f64;
+        let mut s3 = 0.0f64;
+        let mut s4 = 0.0f64;
+        let mut s5 = 0.0f64;
+        let mut s6 = 0.0f64;
+        let mut s7 = 0.0f64;
+        let mut chunks = self.tables.chunks_exact(8);
+        for (ci, chunk) in chunks.by_ref().enumerate() {
+            let word = codes[base + ci];
+            s0 += chunk[0][(word & 0xff) as usize];
+            s1 += chunk[1][((word >> 8) & 0xff) as usize];
+            s2 += chunk[2][((word >> 16) & 0xff) as usize];
+            s3 += chunk[3][((word >> 24) & 0xff) as usize];
+            s4 += chunk[4][((word >> 32) & 0xff) as usize];
+            s5 += chunk[5][((word >> 40) & 0xff) as usize];
+            s6 += chunk[6][((word >> 48) & 0xff) as usize];
+            s7 += chunk[7][((word >> 56) & 0xff) as usize];
         }
-        sum
+        let done = self.tables.len() - chunks.remainder().len();
+        for (i, table) in chunks.remainder().iter().enumerate() {
+            let byte = done + i;
+            let word = codes[base + byte / 8];
+            s0 += table[((word >> ((byte % 8) * 8)) & 0xff) as usize];
+        }
+        ((s0 + s1) + (s2 + s3)) + ((s4 + s5) + (s6 + s7))
     }
 }
 
@@ -373,7 +393,7 @@ impl PqrIndex {
         order.sort_unstable_by(|a, b| phi2[*a].total_cmp(&phi2[*b]));
         let visited = opts.nprobe.min(self.partitions);
 
-        let mut candidates: Vec<(f64, u32)> = Vec::new();
+        let mut candidates: Vec<(f64, u32)> = Vec::with_capacity(k + 1);
         let mut is_visited = vec![false; self.partitions];
         for p in order.iter().take(visited) {
             is_visited[*p] = true;
@@ -843,4 +863,27 @@ fn read_u64(bytes: &[u8], expected: usize) -> Result<Vec<u64>, IndexError> {
         .chunks_exact(8)
         .map(|b| u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fast_stage_dot_matches_naive_channels() {
+        let q: Vec<f64> = (0..128).map(|i| (i as f64 * 0.37).sin()).collect();
+        for m in [4usize, 9, 16, 96, 128] {
+            let stage = FastStage::new(&q, m);
+            let words = m.div_ceil(64);
+            let codes: Vec<u64> = (0..words)
+                .map(|w| 0x9e37_79b9_7f4a_7c15u64.wrapping_mul(w as u64 + 1))
+                .collect();
+            let mut naive = 0.0;
+            for j in 0..m {
+                let bit = (codes[j / 64] >> (j % 64)) & 1;
+                naive += if bit == 1 { q[j] } else { -q[j] };
+            }
+            assert!((stage.dot(&codes, 0) - naive).abs() < 1e-9);
+        }
+    }
 }
