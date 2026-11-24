@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::path::Path;
 
 use rand::Rng;
@@ -23,6 +24,12 @@ const COEFFS: &str = "coeffs.f64";
 const COEFF_C: &str = "coeffc.f64";
 const ORDER: &str = "order.u32";
 const STARTS: &str = "starts.u32";
+
+pub const MAX_INDEX_DIM: usize = 4096;
+pub const MAX_INDEX_N: usize = 20_000_000;
+pub const MAX_INDEX_STAGES: usize = 64;
+pub const MAX_INDEX_FILE_BYTES: u64 = 1 << 30;
+const MAX_MANIFEST_BYTES: usize = 1 << 20;
 
 #[derive(Debug, Clone)]
 pub struct BuildConfig {
@@ -119,6 +126,8 @@ pub enum IndexError {
     SeedMismatch,
     #[error("corrupt index: {0}")]
     Corrupt(String),
+    #[error("index exceeds resource limit: {0}")]
+    Limit(String),
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -710,7 +719,15 @@ impl PqrIndex {
     }
 
     pub fn save(&self, dir: &Path) -> Result<(), IndexError> {
-        fs::create_dir_all(dir)?;
+        let parent = dir
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
+        let staging = tempfile::Builder::new()
+            .prefix(".pqr-save-")
+            .tempdir_in(parent)?;
+        let staged = staging.path().to_path_buf();
         let manifest = Manifest {
             schema: crate::certificate::SCHEMA.to_string(),
             dim: self.dim,
@@ -720,26 +737,37 @@ impl PqrIndex {
             seed_commitment: self.seed_commitment.clone(),
             index_id: self.index_id.clone(),
         };
-        fs::write(dir.join(MANIFEST), serde_json::to_vec_pretty(&manifest)?)?;
-        fs::write(dir.join(VECTORS), f32_bytes(&self.vectors))?;
-        fs::write(dir.join(CENTROIDS), f32_bytes(&self.centroids))?;
-        fs::write(dir.join(ASSIGN), u32_bytes(&self.assign))?;
-        fs::write(dir.join(NORMS), f32_bytes(&self.norms))?;
-        fs::write(dir.join(CODES), u64_bytes(&self.codes))?;
+        write_synced(
+            &staged.join(MANIFEST),
+            &serde_json::to_vec_pretty(&manifest)?,
+        )?;
+        write_synced(&staged.join(VECTORS), &f32_bytes(&self.vectors))?;
+        write_synced(&staged.join(CENTROIDS), &f32_bytes(&self.centroids))?;
+        write_synced(&staged.join(ASSIGN), &u32_bytes(&self.assign))?;
+        write_synced(&staged.join(NORMS), &f32_bytes(&self.norms))?;
+        write_synced(&staged.join(CODES), &u64_bytes(&self.codes))?;
         let mut coeffs = Vec::with_capacity(self.coeff_a.len() * 2);
         for i in 0..self.coeff_a.len() {
             coeffs.push(self.coeff_a[i]);
             coeffs.push(self.coeff_k[i]);
         }
-        fs::write(dir.join(COEFFS), f64_bytes(&coeffs))?;
-        fs::write(dir.join(COEFF_C), f64_bytes(&self.coeff_c))?;
-        fs::write(dir.join(ORDER), u32_bytes(&self.order))?;
-        fs::write(dir.join(STARTS), u32_bytes(&self.starts))?;
+        write_synced(&staged.join(COEFFS), &f64_bytes(&coeffs))?;
+        write_synced(&staged.join(COEFF_C), &f64_bytes(&self.coeff_c))?;
+        write_synced(&staged.join(ORDER), &u32_bytes(&self.order))?;
+        write_synced(&staged.join(STARTS), &u32_bytes(&self.starts))?;
+        sync_dir(&staged)?;
+        let staged = staging.keep();
+        replace_dir(&staged, dir)?;
+        sync_dir(parent)?;
         Ok(())
     }
 
     pub fn load(dir: &Path, seed: &[u8; 32]) -> Result<Self, IndexError> {
-        let manifest: Manifest = serde_json::from_slice(&fs::read(dir.join(MANIFEST))?)?;
+        let manifest_path = dir.join(MANIFEST);
+        if fs::metadata(&manifest_path)?.len() > MAX_MANIFEST_BYTES as u64 {
+            return Err(IndexError::Limit("manifest too large".to_string()));
+        }
+        let manifest: Manifest = serde_json::from_slice(&fs::read(manifest_path)?)?;
         if manifest.schema != crate::certificate::SCHEMA {
             return Err(IndexError::Corrupt("schema".to_string()));
         }
@@ -749,29 +777,70 @@ impl PqrIndex {
         }
         let dim = manifest.dim;
         let n = manifest.n;
+        let partitions = manifest.partitions;
+        let stages_len = manifest.stages.len();
+        if !(3..=MAX_INDEX_DIM).contains(&dim) {
+            return Err(IndexError::Limit("dim".to_string()));
+        }
+        if n == 0 || n > MAX_INDEX_N {
+            return Err(IndexError::Limit("n".to_string()));
+        }
+        if partitions == 0 || partitions > n {
+            return Err(IndexError::Limit("partitions".to_string()));
+        }
+        if stages_len == 0
+            || stages_len > MAX_INDEX_STAGES
+            || manifest.stages.iter().any(|m| *m == 0 || *m > dim)
+            || manifest.stages.windows(2).any(|w| w[0] >= w[1])
+        {
+            return Err(IndexError::Stages);
+        }
         let words = dim.div_ceil(64);
-        let vectors = read_f32(&fs::read(dir.join(VECTORS))?, n * dim)?;
-        let centroids = read_f32(&fs::read(dir.join(CENTROIDS))?, manifest.partitions * dim)?;
-        let assign = read_u32(&fs::read(dir.join(ASSIGN))?, n)?;
-        let norms = read_f32(&fs::read(dir.join(NORMS))?, n)?;
+        let vector_len = checked_len(n, dim)?;
+        let centroid_len = checked_len(partitions, dim)?;
+        let code_len = checked_len(n, words)?;
+        let coeff_len = checked_len(n, stages_len)?;
+        let coeffs_len = checked_len(coeff_len, 2)?;
+        let starts_len = partitions
+            .checked_add(1)
+            .ok_or_else(|| IndexError::Limit("partitions".to_string()))?;
+        let vectors = read_f32(
+            &read_index_file(&dir.join(VECTORS), vector_len, 4)?,
+            vector_len,
+        )?;
+        let centroids = read_f32(
+            &read_index_file(&dir.join(CENTROIDS), centroid_len, 4)?,
+            centroid_len,
+        )?;
+        let assign = read_u32(&read_index_file(&dir.join(ASSIGN), n, 4)?, n)?;
+        let norms = read_f32(&read_index_file(&dir.join(NORMS), n, 4)?, n)?;
         if norms.iter().any(|v| !v.is_finite()) {
             return Err(IndexError::NonFinite);
         }
-        let codes = read_u64(&fs::read(dir.join(CODES))?, n * words)?;
-        let coeffs = read_f64(&fs::read(dir.join(COEFFS))?, n * manifest.stages.len() * 2)?;
-        let mut coeff_a = Vec::with_capacity(n * manifest.stages.len());
-        let mut coeff_k = Vec::with_capacity(n * manifest.stages.len());
+        let codes = read_u64(&read_index_file(&dir.join(CODES), code_len, 8)?, code_len)?;
+        let coeffs = read_f64(
+            &read_index_file(&dir.join(COEFFS), coeffs_len, 8)?,
+            coeffs_len,
+        )?;
+        let mut coeff_a = Vec::with_capacity(coeff_len);
+        let mut coeff_k = Vec::with_capacity(coeff_len);
         for chunk in coeffs.chunks_exact(2) {
             coeff_a.push(chunk[0]);
             coeff_k.push(chunk[1]);
         }
-        let coeff_c = read_f64(&fs::read(dir.join(COEFF_C))?, n * manifest.stages.len())?;
-        let order = read_u32(&fs::read(dir.join(ORDER))?, n)?;
-        let starts = read_u32(&fs::read(dir.join(STARTS))?, manifest.partitions + 1)?;
+        let coeff_c = read_f64(
+            &read_index_file(&dir.join(COEFF_C), coeff_len, 8)?,
+            coeff_len,
+        )?;
+        let order = read_u32(&read_index_file(&dir.join(ORDER), n, 4)?, n)?;
+        let starts = read_u32(
+            &read_index_file(&dir.join(STARTS), starts_len, 4)?,
+            starts_len,
+        )?;
         let mut index = Self {
             dim,
             n,
-            partitions: manifest.partitions,
+            partitions,
             stages: manifest.stages,
             words,
             vectors,
@@ -981,6 +1050,60 @@ fn push_candidate(candidates: &mut Vec<(f64, u32)>, d: f64, id: u32, k: usize) {
 
 fn hex(hash: &blake3::Hash) -> String {
     format!("blake3:{}", hash.to_hex())
+}
+
+fn write_synced(path: &Path, bytes: &[u8]) -> Result<(), IndexError> {
+    let mut file = fs::File::create(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_dir(path: &Path) -> io::Result<()> {
+    fs::File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+fn replace_dir(staged: &Path, dir: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(dir).is_err() {
+        return fs::rename(staged, dir);
+    }
+    let backup = staged.with_extension("old");
+    fs::rename(dir, &backup)?;
+    if let Err(error) = fs::rename(staged, dir) {
+        let _ = fs::remove_dir_all(staged);
+        return match fs::rename(&backup, dir) {
+            Ok(()) => Err(error),
+            Err(restore) => Err(io::Error::new(
+                restore.kind(),
+                format!("{error}; restore failed: {restore}"),
+            )),
+        };
+    }
+    let _ = fs::remove_dir_all(&backup);
+    Ok(())
+}
+
+fn checked_len(a: usize, b: usize) -> Result<usize, IndexError> {
+    a.checked_mul(b)
+        .ok_or_else(|| IndexError::Limit("size overflow".to_string()))
+}
+
+fn read_index_file(path: &Path, elements: usize, width: usize) -> Result<Vec<u8>, IndexError> {
+    let expected = checked_len(elements, width)?;
+    let metadata = fs::metadata(path)?;
+    if metadata.len() > MAX_INDEX_FILE_BYTES.min(expected as u64) {
+        return Err(IndexError::Limit(format!(
+            "{} exceeds maximum file bytes",
+            path.display()
+        )));
+    }
+    fs::read(path).map_err(IndexError::from)
 }
 
 fn f32_bytes(values: &[f32]) -> Vec<u8> {

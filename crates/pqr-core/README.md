@@ -48,6 +48,12 @@ fp64 distance, and the radius shrinks to the k-th exact candidate distance.
   and does not authenticate the producer or the assumptions.
 - L2 only; no inner-product path.
 
+## Resource and mutation contract
+
+- `save` writes all ten files to a fresh sibling staging directory, fsyncs each file and the directory, then swaps it into place. A failed swap restores the previous index; the previous index stays loadable until the swap succeeds. `index_id` is unchanged.
+- `audit` takes `&mut PqrIndex` and leaves it reencoded with the final audit rotation seed and a new `index_id`. `AuditReport::index_id` records the pre-audit identity; reload the index to resume using the original.
+- `load` caps `dim` at 4096, `n` and `partitions` at 20000000, stages at 64, each data file at 1 GiB, and the manifest at 1 MiB. Size checks run before allocation and report `IndexError::Limit`.
+
 ## Testing
 
 ```sh
