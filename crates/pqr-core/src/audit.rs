@@ -99,11 +99,11 @@ pub fn audit(
     }
     let original_id = index.index_id().to_string();
     let reasons = Vec::new();
-    let stage_eps = index.stage_eps(&target)?;
     let mut failures = vec![0u64; nq];
     for rotation in 0..cfg.rotations {
         let seed = rotation_seed(&cfg.master_seed, rotation);
         index.reencode(&seed);
+        let stage_eps = index.stage_eps(&target)?;
         for qi in 0..nq {
             let q = &queries[qi * dim..(qi + 1) * dim];
             let outcome = index.query(

@@ -73,7 +73,25 @@ pub struct QueryOptions {
     pub target: Target,
     pub nprobe: usize,
     pub reasons: Vec<DegradedReason>,
-    pub stage_eps: Option<Vec<f64>>,
+    pub stage_eps: Option<StageEps>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StageEps {
+    values: Vec<f64>,
+    index_id: String,
+    target: Target,
+    stages: usize,
+}
+
+impl StageEps {
+    fn matches(&self, index_id: &str, target: &Target, stages: usize) -> bool {
+        self.index_id == index_id
+            && self.target == *target
+            && self.stages == stages
+            && self.values.len() == stages
+            && self.values.iter().all(|v| v.is_finite() && *v >= 0.0)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -86,6 +104,8 @@ pub enum IndexError {
     NonFinite,
     #[error("k exceeds live vectors")]
     KExceedsLive,
+    #[error("stage epsilon token does not match this index and target")]
+    StageEps,
     #[error("nprobe must be positive")]
     Nprobe,
     #[error("stage bits must be strictly increasing and within dim")]
@@ -460,9 +480,6 @@ impl PqrIndex {
             let r2 = *r * *r;
             let id = self.scan_ids[slot] as usize;
             let x = self.scan_norms[slot] as f64;
-            if r2.is_finite() && (x - phi).abs() > *r {
-                continue;
-            }
             let need_exact = x == 0.0 || phi == 0.0 || !r2.is_finite();
             if need_exact {
                 let d = exact_distance2(&self.vectors, id, self.dim, q64);
@@ -554,8 +571,11 @@ impl PqrIndex {
         let mut r = r2.sqrt();
         let shares = self.stages.len();
         let eps = match &opts.stage_eps {
-            Some(values) if values.len() == shares => values.clone(),
-            _ => self.stage_eps(&opts.target)?,
+            Some(token) if token.matches(&self.index_id, &opts.target, shares) => {
+                token.values.clone()
+            }
+            Some(_) => return Err(IndexError::StageEps),
+            None => self.stage_eps(&opts.target)?.values,
         };
         let inv_sqrt = 1.0 / (self.dim as f64).sqrt();
         let fast: Vec<FastStage> = self
@@ -649,14 +669,19 @@ impl PqrIndex {
         }
     }
 
-    pub fn stage_eps(&self, target: &Target) -> Result<Vec<f64>, IndexError> {
+    pub fn stage_eps(&self, target: &Target) -> Result<StageEps, IndexError> {
         let beta = beta_for(target.tau, target.k, target.delta)?;
         let shares = self.stages.len();
-        let mut eps = Vec::with_capacity(shares);
+        let mut values = Vec::with_capacity(shares);
         for _ in 0..shares {
-            eps.push(beta_quantile(self.dim, beta / shares as f64)?);
+            values.push(beta_quantile(self.dim, beta / shares as f64)?);
         }
-        Ok(eps)
+        Ok(StageEps {
+            values,
+            index_id: self.index_id.clone(),
+            target: *target,
+            stages: shares,
+        })
     }
 
     pub fn dim(&self) -> usize {
@@ -1042,6 +1067,42 @@ mod tests {
         let (lower, upper) = scan_window(phi, f64::INFINITY);
         assert_eq!(lower, f64::NEG_INFINITY);
         assert_eq!(upper, f64::INFINITY);
+    }
+    #[test]
+    fn padded_scan_tests_boundary_norm() {
+        let dim = 3;
+        let vectors = vec![0.0; dim];
+        let cfg = BuildConfig {
+            partitions: 1,
+            stages: vec![dim],
+            iterations: 1,
+        };
+        let (mut index, _) = PqrIndex::build(&vectors, dim, &cfg, &[1u8; 32]).unwrap();
+        let phi = 1024.0f64;
+        let r = 1023.9999999990687f64;
+        let x = 9.0e-10f64;
+        let (lower, upper) = scan_window(phi, r);
+        assert!(lower <= x && x <= upper);
+        index.starts = vec![0, 1];
+        index.scan_norms = vec![x as f32];
+        index.scan_ids = vec![0];
+        index.scan_a = vec![0.0];
+        let mut candidates = Vec::new();
+        let mut radius = r;
+        index.scan_partition(
+            0,
+            phi,
+            &mut radius,
+            &mut candidates,
+            &[],
+            &[0.0],
+            1.0,
+            &[0.0; 3],
+            1,
+            1,
+        );
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].1, 0);
     }
     #[test]
     fn fast_stage_dot_matches_naive_channels() {
