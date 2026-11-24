@@ -31,7 +31,7 @@ UMask=0077
 LimitNOFILE=65536
 LimitNPROC=512
 TasksMax=256
-MemoryMax=512M
+MemoryMax=2048M
 CPUQuota=100%
 
 [Install]

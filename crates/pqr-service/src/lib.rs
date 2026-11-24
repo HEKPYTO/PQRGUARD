@@ -72,6 +72,8 @@ pub struct Config {
     pub seed_env: Option<String>,
     #[arg(long, env = "PQR_SEED_COMMAND", group = "seed", value_name = "CMD")]
     pub seed_command: Option<String>,
+    #[arg(long, env = "PQR_SEED_PUBLIC")]
+    pub seed_public: bool,
     #[arg(long, env = "PQR_BIND", default_value = "127.0.0.1:8080")]
     pub bind: SocketAddr,
     #[arg(long, env = "PQR_API_TOKEN")]
@@ -326,8 +328,6 @@ pub struct QueryRequest {
     pub tau: f64,
     pub delta: f64,
     pub nprobe: usize,
-    #[serde(default)]
-    pub public_seed: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -475,7 +475,7 @@ async fn query_handler(
         return Err(invalid());
     }
     let target = Target::new(request.k, request.tau, request.delta).map_err(|_| invalid())?;
-    let reasons = if request.public_seed {
+    let reasons = if state.config.seed_public {
         vec![DegradedReason::PublicSeed]
     } else {
         Vec::new()
@@ -567,9 +567,23 @@ mod tests {
     use super::*;
     use axum::body::{to_bytes, Body};
     use axum::http::Request;
+    use clap::CommandFactory;
     use pqr_core::index::BuildConfig;
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use tower::ServiceExt;
+
+    #[test]
+    fn seed_public_env_is_wired() {
+        let command = Config::command();
+        let arg = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "seed_public")
+            .expect("seed-public argument");
+        assert_eq!(
+            arg.get_env().and_then(|env| env.to_str()),
+            Some("PQR_SEED_PUBLIC")
+        );
+    }
 
     fn test_state(query_timeout_ms: u64) -> (tempfile::TempDir, Arc<AppState>) {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -601,6 +615,7 @@ mod tests {
             max_k: 8,
             max_nprobe: 4,
             max_concurrency: 64,
+            seed_public: false,
         };
         (dir, Arc::new(AppState::new(index, config, seed)))
     }

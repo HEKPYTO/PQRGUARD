@@ -47,8 +47,9 @@ chown pqr:pqr /etc/pqr/seed.hex
 64 bytes. Alternatives are `--seed-env PQR_SEED_NAME` (value held in a process
 environment variable) and `--seed-command` (a command printing the seed to
 stdout). Prefer a file or secret mount: environment values leak through process
-inspection and crash dumps. Rotate a seed only with a matching index rebuild;
-changing it invalidates every certificate issued from the old index.
+inspection and crash dumps. Rotate a seed only with a matching index rebuild
+and a service restart; a staged reload keeps the startup seed. Changing it
+invalidates every certificate issued from the old index.
 
 ## Index
 
@@ -77,8 +78,9 @@ docker compose -f deploy/docker-compose.yml up -d
 ```
 
 Compose publishes `127.0.0.1:8080` only, mounts the index `ro`, mounts the seed
-as a secret at `/run/secrets/pqr_seed`, restarts on failure, sets CPU/memory
-limits, and uses a `/healthz` healthcheck. Compose ignores secret `uid` and
+as a secret at `/run/secrets/pqr_seed`, restarts on failure, caps memory at
+`2048M` (2 GiB) for the 539 MiB 1M index plus staged-reload and query overhead,
+and uses a `/healthz` healthcheck. Compose ignores secret `uid` and
 `mode` outside Swarm, so the host seed file must be mode `0600` and owned by
 uid `10001`; the service rejects group/other-readable seeds. The token is
 required because the container binds `0.0.0.0:8080`.
@@ -115,7 +117,9 @@ systemctl enable --now pqr-serve
 
 The unit uses `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`,
 `NoNewPrivileges`, `RestrictAddressFamilies`, `MemoryDenyWriteExecute`, and
-`ReadOnlyPaths` for the index. Logs go to the journal as JSON.
+`ReadOnlyPaths` for the index. `MemoryMax=2048M` leaves room for the 539 MiB 1M
+index, a staged replacement index, and query overhead. Logs go to the journal as
+JSON.
 
 ## Reverse proxy and TLS boundary
 
@@ -151,8 +155,9 @@ docker compose -f deploy/docker-compose.yml kill -s HUP pqr-serve
 ```
 
 The service sets readiness false while loading. A failed load leaves readiness
-false until the index directory is fixed and another SIGHUP succeeds. Keep the
-seed unchanged across reloads; write a new index to a fresh directory, swap the
+false until the index directory is fixed and another SIGHUP succeeds. Reloads
+keep the startup seed; seed rotation requires a rebuilt index and a service
+restart, not a staged reload. Write a new index to a fresh directory, swap the
 stable symlink, then signal. SIGTERM drains in-flight requests; allow at least
 the configured stop grace period.
 
@@ -182,7 +187,8 @@ tokens or raw seeds.
 3. Replace the image or binary, restart, then check `/readyz`, one query, and metrics.
 4. Roll back by redeploying the recorded digest or binary and restoring the old index snapshot.
 
-A seed change requires rebuilding the index; rollback must restore both.
+A seed change requires rebuilding the index and restarting the service with the
+new seed; rollback must restart with both the old seed and old index snapshot.
 
 ## Verify the image has no seed
 

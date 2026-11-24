@@ -126,6 +126,10 @@ of raw vectors, or 1.10x raw. A 100M run needs a disk-backed build: 100M x 128
 fp32 is 51.2 GB of raw vectors against 24 GB of host RAM, and the public SIFT
 bundle stops at 1M.
 
+For production, budget 2048 MiB (2 GiB) per service instance: the 539 MiB 1M
+index plus a staged replacement index during reload and query overhead. The
+systemd unit and Compose service use a `2048M` memory cap.
+
 ## Production
 
 | Need | Source |
@@ -141,6 +145,10 @@ TLS at a proxy, prefer file or KMS seed custody over environment variables, and
 treat certificates as self-consistent claims rather than authenticated
 attestations.
 
+Seed rotation is operator-owned: rebuild the index with the new seed and
+restart the service; a staged reload cannot change the seed. `--seed-public`
+marks every query degraded and is set at startup only.
+
 ## Maintenance
 
 PQRGUARD is a public repository at
@@ -155,6 +163,9 @@ Prometheus text; configure service alerts from the thresholds in the
 Roll back by repointing `PQR_INDEX` at the previous known-good index and
 reloading, as described in [`deploy/README.md`](deploy/README.md) and the
 [service rollback runbook](crates/pqr-service/README.md#graceful-reload-and-rollback).
+For seed changes, restart with the matching seed and index; a staged reload
+does not rotate the seed.
+
 Report security issues privately to `@HEKPYTO` through GitHub Security
 Advisories; do not open a public issue.
 

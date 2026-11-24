@@ -29,7 +29,7 @@ fn vectors(dim: usize, n: usize) -> Vec<f32> {
 }
 
 fn fixture(token: Option<&str>, max_body_bytes: usize) -> (TempDir, Arc<AppState>) {
-    fixture_with(token, max_body_bytes, 64, 5_000)
+    fixture_with(token, max_body_bytes, 64, 5_000, false)
 }
 
 fn fixture_with(
@@ -37,6 +37,7 @@ fn fixture_with(
     max_body_bytes: usize,
     max_concurrency: usize,
     query_timeout_ms: u64,
+    seed_public: bool,
 ) -> (TempDir, Arc<AppState>) {
     let dir = tempfile::tempdir().expect("fixture directory");
     let seed = [11u8; 32];
@@ -75,6 +76,9 @@ fn fixture_with(
     if let Some(token) = token {
         args.push("--api-token".to_string());
         args.push(token.to_string());
+    }
+    if seed_public {
+        args.push("--seed-public".to_string());
     }
     let config = Config::parse_from(args);
     (
@@ -203,7 +207,7 @@ async fn bearer_token_required_for_query_metrics_and_reload() {
 }
 
 #[tokio::test]
-async fn valid_query_returns_certificate() {
+async fn default_config_returns_certificate() {
     let (_dir, state) = fixture(None, 65_536);
     let router = build_router(state);
     let (status, body) = json_request(&router, "/v1/query", valid_query()).await;
@@ -218,20 +222,32 @@ async fn valid_query_returns_certificate() {
 }
 
 #[tokio::test]
-async fn degraded_query_never_returns_certificate() {
-    let (_dir, state) = fixture(None, 65_536);
+async fn configured_public_seed_degrades_without_certificate() {
+    let (_dir, state) = fixture_with(None, 65_536, 64, 5_000, true);
     let router = build_router(state);
-    let mut request = valid_query();
-    request["public_seed"] = json!(true);
-    let (status, body) = json_request(&router, "/v1/query", request.clone()).await;
+    let (status, body) = json_request(&router, "/v1/query", valid_query()).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["status"], "degraded");
     assert_eq!(body["degraded"]["status"], "degraded");
     assert_eq!(body["degraded"]["reasons"], json!(["public_seed"]));
     assert!(body.get("certificate").is_none());
-    let (status, certified) = json_request(&router, "/v1/query", valid_query()).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(certified["status"], "certified");
+}
+
+#[tokio::test]
+async fn client_cannot_set_public_seed() {
+    let (_dir, state) = fixture(None, 65_536);
+    let router = build_router(state);
+    let mut request = valid_query();
+    request["public_seed"] = json!(true);
+    let (status, text) = send(
+        &router,
+        Method::POST,
+        "/v1/query",
+        Body::from(request.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(text.contains("public_seed"), "{text}");
 }
 
 #[tokio::test]
@@ -411,7 +427,7 @@ async fn wrong_same_length_token_is_rejected_and_counted() {
 
 #[tokio::test]
 async fn concurrency_limit_holds_permit_until_body_finishes() {
-    let (_dir, state) = fixture_with(None, 65_536, 1, 5_000);
+    let (_dir, state) = fixture_with(None, 65_536, 1, 5_000, false);
     let router = build_router(state);
     let (tx, rx) = tokio::sync::oneshot::channel::<Bytes>();
     let held_router = router.clone();
