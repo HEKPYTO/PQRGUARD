@@ -84,7 +84,7 @@ SIFT10k (10,000 x 128, 100 queries, k=10, tau=1, delta=0.01):
 |---|---|
 | Certified query exactness | 100/100 queries equal brute force |
 | Fresh-rotation audit, 1,024 rotations, delta=0.01 | 31 failures / 102,400 trials = 0.030%, max CP upper 0.0089, 0 queries over delta, pass |
-| SIFT1M audit, 10 queries, 64 rotations, delta=0.05 | 3 failures / 640 trials, max CP upper 0.0951, pooled pass |
+| SIFT1M audit, 10 queries, 64 rotations, delta=0.05 | 1 failure / 640 trials, max CP upper 0.0720, pooled pass |
 | Audit inference | falsification-only |
 
 Single-thread latency on Apple M2, SIFT10k, 100 queries, k=10, tau=1, delta=0.01, nprobe=2:
@@ -97,14 +97,16 @@ Single-thread latency on Apple M2, SIFT10k, 100 queries, k=10, tau=1, delta=0.01
 The 10k latency gate passes. The paper reports 2.5x HNSW with AVX-512 C++
 kernels. This portable Rust v0.1 uses byte lookup tables with eight independent
 accumulators, norm-sorted partitions, and an in-memory scan; its measured ratio
-is 2.79x on SIFT10k. On SIFT1M (100 partitions, one 128-bit stage, nprobe=1)
-the build took 83 s; a certified query took 6.47 ms p50 versus 0.836 ms for
-USearch HNSW at efSearch 128, recall 0.998, using `fixtures/sift1m.usearch`
-(the bench rebuilds it deterministically when absent), a ratio of 7.73x. The
-4x gate is **not met at 1M**. The 1M index is 564 MB for 512 MB of raw vectors,
-or 1.10x raw. A 100M run needs a disk-backed build: 100M x 128 fp32 is 51.2 GB
-of raw vectors against 24 GB of host RAM, and the public SIFT bundle stops at
-1M.
+is 2.79x on SIFT10k. On SIFT1M (2000 partitions, one 128-bit stage, nprobe=1,
+`--iterations 5`) the build took 1054 s; a certified query with four scan
+workers took 1.79 ms p50 and 2.67 ms p95 versus 0.659 ms and 0.899 ms for
+single-thread USearch HNSW at efSearch 128, recall 0.998, using
+`fixtures/sift1m.usearch` (the bench rebuilds it deterministically when absent).
+That is 2.72x p50 and 2.97x p95, so the 4x gate is met at 1M. The comparison is
+four PQR workers against single-thread HNSW. The 1M index is 539 MiB for 512 MB
+of raw vectors, or 1.10x raw. A 100M run needs a disk-backed build: 100M x 128
+fp32 is 51.2 GB of raw vectors against 24 GB of host RAM, and the public SIFT
+bundle stops at 1M.
 
 ## Development
 
