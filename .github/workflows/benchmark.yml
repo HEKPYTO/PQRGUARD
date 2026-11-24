@@ -25,7 +25,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install Python dependencies
-        run: python3 -m pip install numpy
+        run: python3 -m pip install numpy==2.2.6
       - name: Cache SIFT fixtures
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
@@ -49,6 +49,7 @@ jobs:
           echo "HNSW cache absent; generating it from pinned inputs"
           export PQR_BENCH_DIR="$GITHUB_WORKSPACE/target/bench-1m"
           mkdir -p "$PQR_BENCH_DIR"
+          umask 077
           python3 - "$PQR_BENCH_DIR/seed.bin" <<'PY'
           import pathlib
           import sys
@@ -57,6 +58,7 @@ jobs:
               bytes.fromhex("f6d4447d718efc8069ebd632aad19f61783489666e160d135f0a81154efea736")
           )
           PY
+          chmod 600 "$PQR_BENCH_DIR/seed.bin"
           ./target/release/pqr-guard build \
             --vectors fixtures/sift1m.npy --dim 128 --metric l2 \
             --partitions 2000 --code-bits 128 --iterations 5 \
@@ -71,7 +73,7 @@ jobs:
           test "$actual" = "c49c9ad5b3671200b18d58a9b49e73eaaf7ca7ae73d126e446676f95495d11fe"
       - name: Run 1M benchmark
         run: |
-          if [[ -f target/bench-1m/index ]]; then
+          if [[ -d target/bench-1m/index ]]; then
             benchmarks/run_1m.sh --reuse-index
           else
             benchmarks/run_1m.sh

@@ -24,10 +24,22 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
-      - run: pip install numpy
+      - run: pip install numpy==2.2.6
       - name: Generate certified fixture
         run: |
-          python -c "import numpy as np; rng=np.random.default_rng(7); n,d=1000,16; X=(rng.normal(size=(n,d))+np.array([[1,0]*(d//2)])).astype(np.float32); np.save('nightly.npy',X); np.save('nightly_q.npy',X[:10]); open('nightly.seed','wb').write(bytes(range(32)))"
+          umask 077
+          python - <<'PY'
+          import numpy as np
+
+          rng = np.random.default_rng(7)
+          n, d = 1000, 16
+          X = (rng.normal(size=(n, d)) + np.array([[1, 0] * (d // 2)])).astype(np.float32)
+          np.save('nightly.npy', X)
+          np.save('nightly_q.npy', X[:10])
+          with open('nightly.seed', 'wb') as seed:
+              seed.write(bytes(range(32)))
+          PY
+          chmod 600 nightly.seed
       - name: Build and audit
         run: |
           cargo run --locked --release --bin pqr-guard -- build \
