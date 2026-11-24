@@ -565,7 +565,7 @@ impl PqrIndex {
             .collect();
 
         let partitions: Vec<usize> = (0..self.partitions).filter(|p| !is_visited[*p]).collect();
-        if self.n >= 100_000 {
+        if self.n >= 100_000 && !partitions.is_empty() {
             let workers = 4usize.min(partitions.len().max(1));
             let chunk = partitions.len().div_ceil(workers);
             let mut buffers: Vec<Vec<(f64, u32)>> =
