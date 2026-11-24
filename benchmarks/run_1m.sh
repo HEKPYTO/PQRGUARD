@@ -30,7 +30,7 @@ the pinned USearch HNSW cache. The report is written to
 target/bench-1m/bench-report.json (override with PQR_BENCH_DIR).
 
   --reuse-index  skip the index build (seed and config must still match)
-  --dry-run      print the exact commands and verify local pins; run nothing
+  --dry-run      verify input pins (fetch if needed); print commands, write no seed/index/report
 
 Gates: p50/HNSW <= 4, p95/HNSW <= 5, hnsw_ef_search == 128, HNSW recall >= 0.99.
 Exit status is nonzero on any gate failure or missing/mismatched input.
@@ -77,21 +77,30 @@ if [[ "$cache_sha" != "$HNSW_CACHE_SHA" ]]; then
 fi
 printf 'verified HNSW cache: %s\n' "$cache_sha"
 
-run "$BENCH/fetch_sift.sh"
+if (( dry )); then
+  printf '+ %q (verification only)\n' "$BENCH/fetch_sift.sh"
+  "$BENCH/fetch_sift.sh"
+else
+  run "$BENCH/fetch_sift.sh"
+fi
 mkdir -p "$OUT_DIR"
 
 if (( dry )); then
   printf '+ write %s with pinned 32-byte seed\n' "$SEED_FILE"
 else
-  python3 - "$SEED_FILE" "$SEED_HEX" <<'PY'
+  (
+    umask 077
+    python3 - "$SEED_FILE" "$SEED_HEX" <<'PY'
 import pathlib
 import sys
 
 pathlib.Path(sys.argv[1]).write_bytes(bytes.fromhex(sys.argv[2]))
 PY
+  )
+  chmod 600 "$SEED_FILE"
 fi
 
-run cargo build --release --manifest-path "$ROOT/Cargo.toml" -p pqr-cli
+run cargo build --locked --release --manifest-path "$ROOT/Cargo.toml" -p pqr-cli
 
 if (( reuse )); then
   printf 'reusing index: %s\n' "$INDEX_DIR"

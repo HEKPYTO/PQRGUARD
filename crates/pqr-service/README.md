@@ -386,8 +386,8 @@ runbook with the lessons.
 - `serde` / `serde_json` — JSON request/response shapes and response encoding.
 - `thiserror` — typed startup/index errors.
 - `tracing` / `tracing-subscriber` — structured JSON logs and `RUST_LOG` filtering.
-- `tower` / `tower-http` — concurrency limit and request body limit layers.
+- `tower` 0.5 — concurrency-limit layer; request body limit uses `axum::extract::DefaultBodyLimit`.
 - `clap` — flag parsing plus environment-variable defaults.
 - `pqr-core` — index loading, query execution, and certificate types.
 
-Development-only: `tempfile` for generated index fixtures.
+Development-only: `tempfile` for generated index fixtures and `futures-util` for async test helpers.

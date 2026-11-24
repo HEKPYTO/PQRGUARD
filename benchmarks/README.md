@@ -75,7 +75,8 @@ this contract, and are not claimed to use this seed.
 
 ### HNSW cache provenance
 
-`fixtures/sift1m.usearch` is checked in and pinned:
+`fixtures/sift1m.usearch` is gitignored, not checked in. The runner requires
+this exact pinned graph:
 
 ```text
 sha256: c49c9ad5b3671200b18d58a9b49e73eaaf7ca7ae73d126e446676f95495d11fe
@@ -84,22 +85,36 @@ sha256: c49c9ad5b3671200b18d58a9b49e73eaaf7ca7ae73d126e446676f95495d11fe
 It was produced by the CLI's `usearch` 2.26 baseline from the same 1,000,000
 base vectors in id order with `MetricKind::L2sq`, `ScalarKind::F32`,
 connectivity 32, and expansion_add 200. There is no public URL for this cache.
-The runner verifies the checksum and refuses to rebuild a mismatched graph
-silently. To regenerate after a dependency upgrade, build a fresh index with
-the pinned seed, then run the bench with a new cache path:
+On a cold cache, `benchmark.yml` regenerates it with `pqrguard bench
+--hnsw-cache`, verifies the checksum, then warms the Actions cache for later
+runs. The runner verifies the checksum on every run and refuses a mismatched
+graph silently. To reproduce locally:
 
 ```sh
-pqrguard bench --index target/bench-1m/index \
-  --queries fixtures/sift1m_q100.npy --seed-file target/bench-1m/seed.bin \
-  --k 10 --tau 1 --delta 0.01 --nprobe 1 --repeat 5 \
-  --baseline usearch-hnsw --hnsw-cache /tmp/sift1m-new.usearch
-shasum -a 256 /tmp/sift1m-new.usearch
+mkdir -p target/bench-1m
+umask 077
+python3 -c 'import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(bytes.fromhex(sys.argv[2]))' \
+  target/bench-1m/seed.bin \
+  f6d4447d718efc8069ebd632aad19f61783489666e160d135f0a81154efea736
+chmod 600 target/bench-1m/seed.bin
+pqrguard build \
+  --vectors fixtures/sift1m.npy --dim 128 --metric l2 \
+  --partitions 2000 --code-bits 128 --iterations 5 \
+  --seed-file target/bench-1m/seed.bin --out target/bench-1m/index
+pqrguard bench \
+  --index target/bench-1m/index --queries fixtures/sift1m_q100.npy \
+  --seed-file target/bench-1m/seed.bin --k 10 --tau 1 --delta 0.01 \
+  --nprobe 1 --repeat 1 --baseline usearch-hnsw \
+  --hnsw-cache fixtures/sift1m.usearch \
+  --report target/bench-1m/bootstrap.json
+shasum -a 256 fixtures/sift1m.usearch
 ```
 
-Record the new hash in this README before claiming any new result. A new cache
-invalidates previous ratios. The CLI tunes `efSearch` upward from 16 until
-average recall reaches 0.99; the contract requires the pinned cache to select
-`efSearch = 128` and measure recall >= 0.99.
+Only cache the graph after the checksum matches. To regenerate after a
+dependency upgrade, use a new cache path and record the new hash above before
+claiming any new result. A new cache invalidates previous ratios. The CLI tunes
+`efSearch` upward from 16 until average recall reaches 0.99; the contract
+requires the pinned cache to select `efSearch = 128` and measure recall >= 0.99.
 
 ## Machine and interpretation
 
