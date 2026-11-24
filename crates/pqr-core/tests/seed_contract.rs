@@ -67,3 +67,25 @@ fn seed_from_env_and_command() {
     assert_eq!(Seed::from_command(&command).unwrap().as_bytes(), &raw);
     assert!(Seed::from_command("exit 1").is_err());
 }
+
+#[test]
+fn seed_file_accepts_raw_bytes_ending_in_newline() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("raw.seed");
+    let mut raw = [7u8; 32];
+    raw[31] = b'\n';
+    fs::write(&path, raw).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(Seed::from_file(&path).unwrap().as_bytes(), &raw);
+}
+
+#[test]
+fn seed_file_accepts_hex_with_trailing_newline() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hex.seed");
+    let raw = [7u8; 32];
+    let hex: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+    fs::write(&path, format!("{hex}\n")).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(Seed::from_file(&path).unwrap().as_bytes(), &raw);
+}
