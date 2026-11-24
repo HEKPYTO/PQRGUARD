@@ -5,3 +5,4 @@ pub mod control;
 pub mod index;
 pub mod math;
 pub mod rotation;
+pub mod seed;

@@ -26,6 +26,19 @@ Exit `0` when every query is certified, `2` when any query is degraded.
 `--adaptive`, `--public-seed`, `--filtered`, and `--approximate-rerank` force
 degraded records without a claim.
 
+### verify
+
+```sh
+pqrguard verify --certificates certs.jsonl
+```
+
+Checks every JSONL line: schema, certified status, target, stages, strict
+stage ordering, and the claim recomputed from `k`, `tau`, and `delta`. Bare
+certificate objects and `query` output lines are accepted; degraded records
+are not. Prints a JSON summary with line, valid, invalid counts and errors.
+Exit `2` if any line is invalid. This checks self-consistency only: it does not
+authenticate the producer, attest to the assumptions, or verify a signature.
+
 ### audit
 
 ```sh
@@ -38,7 +51,8 @@ The index is re-encoded under fresh rotations derived from an audit master seed.
 With fewer than 1,000 rotations the verdict uses the pooled failure-rate gate.
 With 1,000 or more it uses per-query Clopper-Pearson: at most 0.5% of queries
 above `delta`, none above `1.5 * delta`, and pooled rate at most `delta`.
-Exit `3` on audit failure, `4` on configuration or I/O errors.
+`--rotations` must be positive. Exit `3` on audit failure, `4` on configuration
+or I/O errors.
 
 ### bench
 
@@ -58,7 +72,9 @@ baseline only; it is never certified. Use `--baseline none` to time only PQR.
 
 Supply exactly one seed source:
 
-- `--seed-file PATH`: 32 raw bytes.
+- `--seed-file PATH`: 32 raw bytes or 64 hex characters. On Unix the file must
+  not be a symlink and must have no group or other permission bits (`0600` or
+  stricter).
 - `--seed-env VAR`: 32 raw bytes or 64 hex characters.
 - `--seed-command CMD`: run `sh -c CMD`; stdout must be 32 raw bytes or 64 hex
   characters. Use this to call a KMS CLI.
@@ -73,6 +89,6 @@ domain separator unless `--audit-seed-file` is supplied.
 | Code | Meaning |
 |---:|---|
 | 0 | Success, certified, or audit pass |
-| 2 | At least one degraded query |
+| 2 | At least one degraded query, or an invalid certificate line in `verify` |
 | 3 | Audit failure |
 | 4 | Invalid configuration, corrupt index, dimension mismatch, I/O error |
