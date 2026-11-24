@@ -497,61 +497,58 @@ impl PqrIndex {
             .map(|m| FastStage::new(&q_rot, *m))
             .collect();
 
-        for p in 0..self.partitions {
-            if is_visited[p] {
-                continue;
+        let partitions: Vec<usize> = (0..self.partitions).filter(|p| !is_visited[*p]).collect();
+        if self.n >= 100_000 {
+            let workers = 4usize.min(partitions.len().max(1));
+            let chunk = partitions.len().div_ceil(workers);
+            let mut buffers: Vec<Vec<(f64, u32)>> =
+                (0..workers).map(|_| Vec::with_capacity(k + 1)).collect();
+            std::thread::scope(|scope| {
+                let mut available = buffers.iter_mut();
+                for part in partitions.chunks(chunk) {
+                    let buffer = available.next().expect("worker buffer");
+                    let mut radius = r;
+                    let phi_ref = &phi2;
+                    let fast_ref = &fast;
+                    let eps_ref = &eps;
+                    let q_ref = &q64;
+                    scope.spawn(move || {
+                        for &p in part {
+                            self.scan_partition(
+                                p,
+                                phi_ref[p].sqrt(),
+                                &mut radius,
+                                buffer,
+                                fast_ref,
+                                eps_ref,
+                                inv_sqrt,
+                                q_ref,
+                                k,
+                                shares,
+                            );
+                        }
+                    });
+                }
+            });
+            for buffer in &buffers {
+                for &(d, id) in buffer.iter() {
+                    push_candidate(&mut candidates, d, id, k);
+                }
             }
-            let phi = phi2[p].sqrt();
-            let begin = self.starts[p] as usize;
-            let end = self.starts[p + 1] as usize;
-            let (lower, upper) = scan_window(phi, r);
-            let sub = &self.scan_norms[begin..end];
-            let lo = begin + sub.partition_point(|x| (*x as f64) < lower);
-            let hi = begin + sub.partition_point(|x| (*x as f64) <= upper);
-            for slot in lo..hi {
-                let id = self.scan_ids[slot] as usize;
-                let x = self.scan_norms[slot] as f64;
-                if r2.is_finite() && (x - phi).abs() > r {
-                    continue;
-                }
-                let need_exact = x == 0.0 || phi == 0.0 || !r2.is_finite();
-                if need_exact {
-                    let d = exact_distance2(&self.vectors, id, self.dim, &q64);
-                    push_candidate(&mut candidates, d, id as u32, k);
-                    if candidates.len() >= k {
-                        r2 = candidates[k - 1].0;
-                        r = r2.sqrt();
-                    }
-                    continue;
-                }
-                let base = slot * self.words;
-                let cbase = slot * shares;
-                let theta = (x * x + phi * phi - r * r) / (2.0 * x * phi);
-                let mut pruned = false;
-                for l in 0..shares {
-                    let a = self.scan_a[cbase + l];
-                    if a <= 0.0 {
-                        continue;
-                    }
-                    let dot = fast[l].dot(&self.scan_codes, base);
-                    let mut b = dot * inv_sqrt;
-                    b -= self.scan_c[cbase + l];
-                    b /= phi;
-                    let kappa = self.scan_k[cbase + l];
-                    let slack =
-                        (1.0 - theta.max(0.0) * theta.max(0.0)).sqrt() * (1.0 + 1e-9) + 1e-12;
-                    if b / a + slack * kappa * eps[l] < theta {
-                        pruned = true;
-                        break;
-                    }
-                }
-                if pruned {
-                    continue;
-                }
-                let d = exact_distance2(&self.vectors, id, self.dim, &q64);
-                push_candidate(&mut candidates, d, id as u32, k);
-                r2 = candidates[k - 1].0;
-                r = r2.sqrt();
+        } else {
+            for p in partitions {
+                self.scan_partition(
+                    p,
+                    phi2[p].sqrt(),
+                    &mut r,
+                    &mut candidates,
+                    &fast,
+                    &eps,
+                    inv_sqrt,
+                    &q64,
+                    k,
+                    shares,
+                );
             }
         }
 
