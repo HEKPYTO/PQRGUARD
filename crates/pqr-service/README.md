@@ -31,6 +31,7 @@ Every flag has an equivalent environment variable. Exactly one seed source must 
 | `--seed-file` | `PQR_SEED_FILE` | none | 32 raw bytes or 64 hex characters; trailing ASCII whitespace allowed, no symlink, no group/world read access. |
 | `--seed-env` | `PQR_SEED_ENV` | none | Name of a variable holding the seed; value is ASCII-trimmed. |
 | `--seed-command` | `PQR_SEED_COMMAND` | none | Shell command whose stdout is an ASCII-trimmed seed. |
+| `--seed-public` | `PQR_SEED_PUBLIC` | `false` | Operator flag: mark every query degraded with reason `public_seed`; request clients cannot set or clear it. |
 | `--bind` | `PQR_BIND` | `127.0.0.1:8080` | Listener address. Non-loopback binds require a token. |
 | `--api-token` | `PQR_API_TOKEN` | none | Bearer token for protected endpoints; empty or whitespace-only values are rejected. |
 | `--max-body-bytes` | `PQR_MAX_BODY_BYTES` | `65536` | Per-request body limit; larger bodies get 413. |
@@ -45,6 +46,22 @@ must be regular files with no symlink and no group or world read bits, and the
 file reader rejects oversized files. Startup fails before binding if the index
 cannot be loaded, the seed does not match the index commitment, or config is
 invalid.
+
+### Query API
+
+`POST /v1/query` accepts exactly these JSON fields:
+
+```json
+{"query": [0.25, 0.5, 0.75, 1.0], "k": 3, "tau": 1.0, "delta": 0.1, "nprobe": 2}
+```
+
+There is no request-level degradation switch. Unknown fields, including
+`public_seed`, are rejected with HTTP 422 before the query runs. The response
+contains `hits` and `status` plus either `certificate` for `status: "certified"`
+or `degraded` for `status: "degraded"`. A degraded response never carries a
+certificate. `--seed-public` makes every accepted query degraded with
+`degraded.reasons: ["public_seed"]`; by default queries are certified when the
+index can produce a certificate.
 
 ### Authentication and token rotation
 
@@ -72,9 +89,11 @@ admin reload. There is no role separation. Restrict `/admin/reload` and
 
 ### Capacity, concurrency, and timeouts
 
-The index is loaded fully into memory at startup. Budget RAM for the index plus
-query working set; do not rely on swap for latency. The 1M-point index in the
-root README is about 539 MiB for 512 MB of raw vectors.
+The index is loaded fully into memory at startup. The 1M-point index in the
+root README is about 539 MiB for 512 MB of raw vectors. Budget 2048 MiB (2 GiB)
+per instance: a staged reload holds the active and replacement indexes at once,
+plus query working set and allocator overhead. Both the systemd unit and Compose
+service cap memory at `2048M`. Do not rely on swap for latency.
 
 - `PQR_MAX_CONCURRENCY` (default 64) caps in-flight requests with a tower layer.
   The effective cap is 64 even if a larger value is configured, keeping the
@@ -125,6 +144,10 @@ reload, index, and epsilon-cache locks are recovered with `into_inner()` rather
 than leaving the service wedged. `SIGTERM` and `SIGINT` drain in-flight requests
 through `axum::serve`.
 
+A staged reload keeps the seed and `--seed-public` setting from startup; it
+cannot rotate the seed or change degradation mode. A seed change needs a full
+restart with the new seed and a matching rebuilt index.
+
 There is no in-process version history. Rollback means pointing `PQR_INDEX` at
 the previous known-good directory and reloading again. Keep the previous
 directory until the new one has served traffic and passed verification.
@@ -138,8 +161,9 @@ directory until the new one has served traffic and passed verification.
 - `--seed-command` runs through `sh -c` with service privileges. Only use a
   trusted, pinned command.
 - The index stores only a BLAKE3 commitment to the seed. A seed change requires
-  rebuilding the index with `pqrguard build`; swapping the seed alone fails
-  startup with a commitment mismatch.
+  rebuilding the index with `pqrguard build` **and restarting** the service with
+  the new seed; a staged reload keeps the startup seed and cannot rotate it.
+  Swapping the seed alone fails startup with a commitment mismatch.
 - Keep the seed out of the index backup, logs, repository, and tickets. Treat
   it as compromised if it appeared in process environment dumps.
 - A seed file must be a regular file, not a symlink, with no group or world read
@@ -160,6 +184,9 @@ directory until the new one has served traffic and passed verification.
   successful reload; the failure is logged and counted as a server error.
 - Query error: input errors are 400, timeouts are 504, internal failures are
   500, and an unavailable index is 503. None of these return certificates.
+- Client-supplied `public_seed`: rejected with 422; degradation is owned by
+  `--seed-public`/`PQR_SEED_PUBLIC`, which marks every query `degraded` with
+  reason `public_seed` and omits the certificate.
 - Unauthorized request: 401 on protected routes; health and readiness remain
   public.
 - SIGTERM/SIGINT: graceful drain of in-flight requests.
@@ -270,8 +297,10 @@ cold storage, then replace these numbers with measured restore times.
 Point `PQR_INDEX` at the restored directory and call `POST /admin/reload` or
 send `SIGHUP`. Expect a brief 503 window while readiness is false. After the
 reload, check `/readyz`, sample `/v1/query`, and verify the certificate's
-`index_id`. Keep the prior directory in place until traffic and verification
-look normal; roll back by pointing back to it and reloading again.
+`index_id`. When the seed changes, restart the service with the new seed and
+the matching index; a staged reload keeps the old seed. Keep the prior directory
+in place until traffic and verification look normal; roll back by restarting
+with the previous seed and directory.
 
 ## Observability
 
@@ -319,9 +348,10 @@ Starting thresholds; tune to the local baseline from the load test.
 | Query request rate | zero for 5 minutes in business hours | Ticket; check proxy and DNS |
 
 Starting SLOs: 99.9% monthly readiness availability; at least 99.9% of accepted
-certified queries return a certificate (excluding intentional degraded
-requests); p95 at or below 500 ms at the agreed concurrency; zero logged seeds,
-tokens, or vectors; 100% of release artifacts verified before deployment.
+certified queries return a certificate (excluding operator-configured
+`public_seed` degradation); p95 at or below 500 ms at the agreed concurrency;
+zero logged seeds, tokens, or vectors; 100% of release artifacts verified before
+deployment.
 
 Bodies are capped before parsing, query work runs on the blocking pool under a
 wall-clock timeout that includes blocking-pool queue time, and concurrency is
@@ -352,9 +382,10 @@ severity and an incident owner.
 Stop traffic to affected instances at the proxy. Revoke a token by rotating it
 at the proxy and restarting the service with a different value. If seed
 exposure is suspected, treat every certificate produced with that seed as
-untrusted: build a new index from a new seed, deploy it via the staged reload
-path, and revoke the old token. Preserve logs and a read-only copy of the
-suspect index directory before wiping anything.
+untrusted: build a new index from a new seed, restart the service with that seed
+and new index, and revoke the old token. A staged reload cannot change the seed.
+Preserve logs and a read-only copy of the suspect index directory before wiping
+anything.
 
 ### Eradication
 
@@ -365,10 +396,11 @@ configuration that allowed the exposure.
 
 ### Recovery
 
-Restore the last known-good index and seed, reload, confirm `/readyz`, run a
-sample certified query, and verify its certificate and `index_id`. Ramp traffic
-back through the proxy and watch 5xx, timeout, and latency alerts before
-closing the incident.
+For an index-only incident, restore the last known-good index and seed, reload,
+confirm `/readyz`, run a sample certified query, and verify its certificate and
+`index_id`. For seed compromise, restart with a new seed and rebuilt index; a
+staged reload is not sufficient. Ramp traffic back through the proxy and watch
+5xx, timeout, and latency alerts before closing the incident.
 
 ### Evidence and postmortem
 
