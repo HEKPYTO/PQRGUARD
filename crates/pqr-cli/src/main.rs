@@ -704,4 +704,24 @@ mod tests {
         assert!(validate_queries(&data, &[2, 64], 128).is_err());
         assert!(validate_queries(&[], &[0, 128], 128).is_err());
     }
+
+    #[test]
+    fn seed_args_load_hex_with_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("seed.hex");
+        let raw = [7u8; 32];
+        let hex: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+        fs::write(&path, format!("{hex}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let args = SeedArgs {
+            seed_file: Some(path),
+            seed_env: None,
+            seed_command: None,
+        };
+        assert_eq!(args.read().unwrap().as_bytes(), &raw);
+    }
 }

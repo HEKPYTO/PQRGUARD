@@ -50,9 +50,10 @@ fp64 distance, and the radius shrinks to the k-th exact candidate distance.
 
 ## Resource and mutation contract
 
-- `save` writes all ten files to a fresh sibling staging directory, fsyncs each file and the directory, then swaps it into place. A failed swap restores the previous index; the previous index stays loadable until the swap succeeds. `index_id` is unchanged.
+- `save` writes all ten files to a fresh sibling staging directory, fsyncs each file and the directory, then swaps it into place under `.pqr-index.lock` (the parent directory must be writable). A failed swap restores the previous index. If a crash stops between the two renames, the previous index sits in sibling `.pqr-backup-<index-dir-name>`; the next `save` or `load` restores it and sweeps stale `.pqr-save-*` directories. `index_id` is unchanged.
 - `audit` takes `&mut PqrIndex` and leaves it reencoded with the final audit rotation seed and a new `index_id`. `AuditReport::index_id` records the pre-audit identity; reload the index to resume using the original.
-- `load` caps `dim` at 4096, `n` and `partitions` at 20000000, stages at 64, each data file at 1 GiB, and the manifest at 1 MiB. Size checks run before allocation and report `IndexError::Limit`.
+- `load` caps `dim` at 4096, `n` and `partitions` at 20000000, stages at 64, each data file at 1 GiB, and the manifest at 1 MiB. Files open without following symlinks on Unix; size is checked on the open handle and reads are bounded, so `IndexError::Limit` is returned before oversized allocation.
+- `Seed::from_file` opens with `O_NOFOLLOW` on Unix, checks mode and size on the open handle, then parses raw bytes first and trims only as a fallback. Service and CLI share this loader.
 
 ## Testing
 
