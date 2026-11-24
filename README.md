@@ -78,6 +78,16 @@ Positive control, Proposition 1 placement, from
 | Weakened epsilon, delta'=0.02 | 100,000 | 1,964 | 1.964% | 1.87-1.98% |
 | Weakened epsilon, delta'=0.05 | 100,000 | 4,863 | 4.863% | 4.69-4.86% |
 
+Source notes. "Paper" is PQR-Search, *Per-Query Recall Guarantees for
+Approximate Nearest Neighbor Search in Dynamic Vector Databases*,
+[arXiv:2611.07579v2](https://arxiv.org/abs/2611.07579v2). The Proposition 1
+placement comes from that paper and its reference implementation,
+[suanlab/pqr-search](https://github.com/suanlab/pqr-search). The 0.5-1.5% bands
+are this repo's acceptance tolerance for that check, not a table printed
+verbatim in the paper. The paper's own aggregate audit is 45 failures in
+4,176,000 trials (at most 0.5% of delta per setting), reported in Section 6.2.
+The weakened-epsilon bands are the corresponding local detection bands.
+
 SIFT10k (10,000 x 128, 100 queries, k=10, tau=1, delta=0.01):
 
 | Check | Result |
@@ -94,10 +104,11 @@ Single-thread latency on Apple M2, SIFT10k, 100 queries, k=10, tau=1, delta=0.01
 | p50 | 0.113 ms | 0.0406 ms | 2.79x | <= 4x |
 | p95 | 0.159 ms | 0.0543 ms | 2.93x | <= 5x |
 
-The 10k latency gate passes. The paper reports 2.5x HNSW with AVX-512 C++
-kernels. This portable Rust v0.1 uses byte lookup tables with eight independent
-accumulators, norm-sorted partitions, and an in-memory scan; its measured ratio
-is 2.79x on SIFT10k. On SIFT1M (2000 partitions, one 128-bit stage, nprobe=1,
+The 10k latency gate passes. PQR-Search
+([arXiv:2611.07579v2](https://arxiv.org/abs/2611.07579v2), Section 6.3) reports
+2.5x HNSW with AVX-512 C++ kernels. This portable Rust v0.1 uses byte lookup
+tables with eight independent accumulators, norm-sorted partitions, and an
+in-memory scan; its measured ratio is 2.79x on SIFT10k. On SIFT1M (2000 partitions, one 128-bit stage, nprobe=1,
 `--iterations 5`) the build took 1054 s; a certified query with four scan
 workers took 1.79 ms p50 and 2.67 ms p95 versus 0.659 ms and 0.899 ms for
 single-thread USearch HNSW at efSearch 128, recall 0.998, using
