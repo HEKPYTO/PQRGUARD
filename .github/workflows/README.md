@@ -11,11 +11,16 @@ use `--locked`.
 
 ## Workflows
 
-- `ci.yml` — format, clippy, tests, `cargo deny check`, `cargo audit`, and a
-  CycloneDX SBOM. Publishes artifact `sbom` with `sbom.cdx.json` and
+- `ci.yml` — format, clippy, tests, `cargo deny check`, `cargo audit`, a
+  CycloneDX SBOM, and a fast `bench-syntax` job (`bash -n`, Python compile,
+  CLI `--help`). Publishes artifact `sbom` with `sbom.cdx.json` and
   `Cargo.lock`. `cargo-cyclonedx` 0.5.10 has no `--output` flag;
   `--override-filename sbom.cdx` produces the same `sbom.cdx.json` file.
 - `nightly.yml` — scheduled certified audit with a generated fixture.
+- `benchmark.yml` — nightly and manual 1M contract. Caches SIFT fixtures,
+  runs `benchmarks/fetch_sift.sh`, bootstraps the pinned HNSW cache on a cold
+  cache, calls `benchmarks/run_1m.sh` (`--reuse-index` when an index exists),
+  uploads `bench-report`, and fails on any gate breach.
 - `release.yml` — runs on tags `v*` or `workflow_dispatch`. Builds
   `pqrguard` for `x86_64-unknown-linux-gnu` (native) and
   `aarch64-unknown-linux-gnu` (via `cross`, which needs Docker). Each build
@@ -71,3 +76,9 @@ crates.io. `cargo deny check` and `cargo audit` fetch the RustSec advisory
 database. GitHub artifact attestations are free on public repositories; a
 private repository needs GitHub Advanced Security. `cross` needs Docker,
 available on `ubuntu-latest`.
+
+`benchmark.yml` needs outbound FTP access to `ftp.irisa.fr` for
+`fetch_sift.sh`, enough RAM for the 1M graph (reference machine: 24 GB), and a
+cache hit or deterministic regeneration of the pinned HNSW graph. A cold-cache
+graph generated on Linux must match the pinned checksum; if it does not, seed
+the Actions cache from the verified local fixture before relying on this job.
