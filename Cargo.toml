@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/pqr-core", "crates/pqr-cli"]
+members = ["crates/pqr-core", "crates/pqr-cli", "crates/pqr-service"]
 resolver = "2"
 
 [workspace.package]
