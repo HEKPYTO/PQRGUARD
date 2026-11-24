@@ -260,7 +260,7 @@ fn run_audit(args: AuditArgs) -> CliResult<i32> {
         Some(path) => Seed::from_file(path)?,
         None => {
             let mut h = blake3::Hasher::new();
-            h.update(b"pqr.guard.audit.master");
+            h.update(b"pqrguard.audit.master");
             h.update(seed.as_bytes());
             Seed::from_bytes(*h.finalize().as_bytes())
         }

@@ -65,7 +65,7 @@ pub fn clopper_pearson_upper(failures: u64, trials: u64) -> f64 {
 
 fn rotation_seed(master: &Seed, rotation: u64) -> Seed {
     let mut h = blake3::Hasher::new();
-    h.update(b"pqr.guard.audit.rotation");
+    h.update(b"pqrguard.audit.rotation");
     h.update(master.as_bytes());
     h.update(&rotation.to_le_bytes());
     Seed::from_bytes(*h.finalize().as_bytes())

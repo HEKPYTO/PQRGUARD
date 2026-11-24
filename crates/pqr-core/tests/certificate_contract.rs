@@ -21,7 +21,7 @@ fn certificate_carries_theorem_fields_and_no_recall_key() {
     let target = Target::new(10, 0.9, 0.01).unwrap();
     let cert = Certificate::certified("blake3:abc", 64, &target, &[128, 256, 512, 640]);
     let value = serde_json::to_value(&cert).unwrap();
-    assert_eq!(value["schema"], "pqr.guard/v0.1");
+    assert_eq!(value["schema"], "pqrguard/v0.1");
     assert_eq!(value["claim"]["theorem"], "Thm3");
     assert!((value["claim"]["beta"].as_f64().unwrap() - 0.001).abs() < 1e-15);
     assert_eq!(value["claim"]["m_allowed"], 0);
@@ -88,7 +88,7 @@ fn verify_rejects_invalid_structure_and_degraded_status() {
     bad.status = Status::Degraded;
     assert_eq!(bad.verify().unwrap_err(), CertificateError::Status);
     bad = cert.clone();
-    bad.schema = "pqr.guard/v0.2".to_string();
+    bad.schema = "pqrguard/v0.2".to_string();
     assert_eq!(bad.verify().unwrap_err(), CertificateError::Schema);
     bad = cert.clone();
     bad.dim = 2;

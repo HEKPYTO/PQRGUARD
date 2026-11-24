@@ -11,7 +11,7 @@ Core library for PQRGUARD: Beta-quantile certificate math, Haar rotation,
 | `rotation` | Haar-random orthogonal matrix from Gaussian QR with sign correction; `P^T` application. |
 | `code` | 1-bit code, prefix statistics `a`, `b`, `kappa`, prune predicate. |
 | `index` | IVF k-means, residual encoding, packed codes, staged scan, adaptive radius, save/load. |
-| `certificate` | Target validation, certificate and degraded records, `Certificate::verify` recomputation, schema `pqr.guard/v0.1`. |
+| `certificate` | Target validation, certificate and degraded records, `Certificate::verify` recomputation, schema `pqrguard/v0.1`. |
 | `audit` | Fresh-rotation replay, recall comparison, pooled and per-query gates. |
 | `control` | Proposition 1 positive control placement. |
 
