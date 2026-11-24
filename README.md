@@ -83,23 +83,24 @@ SIFT10k (10,000 x 128, 100 queries, k=10, tau=1, delta=0.01):
 | Check | Result |
 |---|---|
 | Certified query exactness | 100/100 queries equal brute force |
-| Fresh-rotation audit, 64 rotations, delta=0.05 | 17 failures / 6,400 trials = 0.266%, pooled gate pass |
+| Fresh-rotation audit, 1,024 rotations, delta=0.01 | 24 failures / 102,400 trials = 0.023%, max CP upper 0.0076, 0 queries over delta, pass |
 | SIFT1M audit, 10 queries, 64 rotations, delta=0.05 | 0 failures / 640 trials, CP upper 0.0457, pooled pass |
 | Audit inference | falsification-only |
 
-Single-thread latency on Apple M2, SIFT10k, 100 queries, k=10, nprobe=2:
+Single-thread latency on Apple M2, SIFT10k, 100 queries, k=10, tau=1, delta=0.01, nprobe=2:
 
 | Metric | PQR | USearch HNSW (efSearch 32, recall 0.996) | Ratio | Gate |
 |---|---:|---:|---:|---|
-| p50 | 0.153 ms | 0.039 ms | 3.95x | <= 4x |
-| p95 | 0.212 ms | 0.052 ms | 4.02x | <= 5x |
-| Throughput vs exact brute force | 5.42x | - | - | - |
+| p50 | 0.119 ms | 0.0385 ms | 3.09x | <= 4x |
+| p95 | 0.161 ms | 0.0517 ms | 3.11x | <= 5x |
+| Throughput vs exact brute force | 7.14x | - | - | - |
 
-The paper reports 2.5x HNSW with AVX-512 C++ kernels. This portable Rust v0.1
-uses byte lookup tables and an in-memory scan; its measured ratio is 3.95x on
-SIFT10k. On SIFT1M (100 partitions, one 128-bit stage) the build took 83 s; a
-certified query took 42.15 ms p50 versus 0.209 ms for USearch HNSW at recall
-1.000, a ratio of 201.6x. The 4x gate is **not met at 1M**. The 1M index is
+The 10k latency gate passes. The paper reports 2.5x HNSW with AVX-512 C++
+kernels. This portable Rust v0.1 uses byte lookup tables with eight independent
+accumulators and an in-memory scan; its measured ratio is 3.09x on SIFT10k.
+On SIFT1M (100 partitions, one 128-bit stage, nprobe=1) the build took 83 s; a
+certified query took 20.60 ms p50 versus 0.629 ms for USearch HNSW at recall
+0.998, a ratio of 32.7x. The 4x gate is **not met at 1M**. The 1M index is
 564 MB for 512 MB of raw vectors, or 1.10x raw. A 100M run needs a
 disk-backed build: 100M x 128 fp32 is 51.2 GB of raw vectors against 24 GB of
 host RAM, and the public SIFT bundle stops at 1M.
