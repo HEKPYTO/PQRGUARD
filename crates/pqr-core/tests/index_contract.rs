@@ -145,6 +145,53 @@ fn degraded_never_contains_certificate() {
 }
 
 #[test]
+fn stage_eps_token_is_bound_to_its_index_and_target() {
+    let dim = 12;
+    let vectors = data(600, dim);
+    let cfg = BuildConfig {
+        partitions: 12,
+        stages: vec![6, dim],
+        iterations: 5,
+    };
+    let (index, _) = PqrIndex::build(&vectors, dim, &cfg, &[7u8; 32]).unwrap();
+    let (other_index, _) = PqrIndex::build(&vectors, dim, &cfg, &[8u8; 32]).unwrap();
+    let target = Target::new(5, 1.0, 0.01).unwrap();
+    let token = index.stage_eps(&target).unwrap();
+    let q = &vectors[..dim];
+    let base = QueryOptions {
+        target,
+        nprobe: 2,
+        reasons: Vec::new(),
+        stage_eps: None,
+    };
+    let valid = QueryOptions {
+        stage_eps: Some(token.clone()),
+        ..base.clone()
+    };
+    assert!(matches!(
+        index.query(q, &valid),
+        Ok(QueryOutcome::Certified { .. })
+    ));
+    let foreign_target = QueryOptions {
+        target: Target::new(5, 0.9, 0.01).unwrap(),
+        stage_eps: Some(token.clone()),
+        ..base.clone()
+    };
+    assert!(matches!(
+        index.query(q, &foreign_target),
+        Err(IndexError::StageEps)
+    ));
+    let foreign_index = QueryOptions {
+        stage_eps: Some(token),
+        ..base
+    };
+    assert!(matches!(
+        other_index.query(q, &foreign_index),
+        Err(IndexError::StageEps)
+    ));
+}
+
+#[test]
 fn audit_is_falsification_only_and_reports_trials() {
     use pqr_core::audit::{audit, AuditConfig};
     let dim = 12;
@@ -283,30 +330,34 @@ fn out_of_distribution_queries_stay_correct() {
 }
 
 #[test]
-fn all_visited_large_index_query_does_not_panic() {
+fn large_index_queries_cover_exhaustive_and_parallel_paths() {
     let dim = 8;
     let vectors = data(100_000, dim);
     let cfg = BuildConfig {
-        partitions: 4,
+        partitions: 5,
         stages: vec![dim],
         iterations: 1,
     };
     let (index, _) = PqrIndex::build(&vectors, dim, &cfg, &[7u8; 32]).unwrap();
-    let outcome = index
-        .query(
-            &vectors[..dim],
-            &QueryOptions {
-                target: Target::new(1, 1.0, 0.01).unwrap(),
-                nprobe: 8,
-                reasons: Vec::new(),
-                stage_eps: None,
-            },
-        )
-        .unwrap();
-    let QueryOutcome::Certified { hits, .. } = outcome else {
+    let target = Target::new(1, 1.0, 0.01).unwrap();
+    let q = &vectors[..dim];
+    let options = |nprobe| QueryOptions {
+        target,
+        nprobe,
+        reasons: Vec::new(),
+        stage_eps: None,
+    };
+    let exhaustive = index.query(q, &options(8)).unwrap();
+    let QueryOutcome::Certified { hits, .. } = exhaustive else {
         panic!("expected certified");
     };
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].id, 0);
     assert_eq!(hits[0].distance2, 0.0);
+    let parallel = index.query(q, &options(1)).unwrap();
+    let QueryOutcome::Certified { hits, .. } = parallel else {
+        panic!("expected certified");
+    };
+    let got: Vec<u64> = hits.iter().map(|h| h.id).collect();
+    assert_eq!(got, brute(&vectors, dim, q, 1));
 }
