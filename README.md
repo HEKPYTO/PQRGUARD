@@ -39,6 +39,7 @@ that pass all stages are re-ranked with exact fp64 distances.
 
 ```sh
 head -c 32 /dev/urandom > seed.bin
+chmod 600 seed.bin
 
 python -c "import numpy as np; rng=np.random.default_rng(1); X=rng.normal(size=(2000,16)).astype(np.float32); np.save('vectors.npy',X); np.save('queries.npy',X[:20])"
 
