@@ -504,14 +504,10 @@ impl PqrIndex {
             let phi = phi2[p].sqrt();
             let begin = self.starts[p] as usize;
             let end = self.starts[p + 1] as usize;
-            let (lo, hi) = if r2.is_finite() {
-                let sub = &self.scan_norms[begin..end];
-                let low = begin + sub.partition_point(|x| (*x as f64) < next_down(phi - r));
-                let high = begin + sub.partition_point(|x| (*x as f64) <= next_up(phi + r));
-                (low, high)
-            } else {
-                (begin, end)
-            };
+            let (lower, upper) = scan_window(phi, r);
+            let sub = &self.scan_norms[begin..end];
+            let lo = begin + sub.partition_point(|x| (*x as f64) < lower);
+            let hi = begin + sub.partition_point(|x| (*x as f64) <= upper);
             for slot in lo..hi {
                 let id = self.scan_ids[slot] as usize;
                 let x = self.scan_norms[slot] as f64;
@@ -861,32 +857,12 @@ fn distance2(vectors: &[f32], id: usize, centroids: &[f32], c: usize, dim: usize
     s
 }
 
-fn next_up(x: f64) -> f64 {
-    if x.is_nan() || x == f64::INFINITY {
-        return x;
+fn scan_window(phi: f64, r: f64) -> (f64, f64) {
+    if !phi.is_finite() || !r.is_finite() {
+        return (f64::NEG_INFINITY, f64::INFINITY);
     }
-    if x == 0.0 {
-        return f64::from_bits(1);
-    }
-    if x > 0.0 {
-        f64::from_bits(x.to_bits() + 1)
-    } else {
-        f64::from_bits(x.to_bits() - 1)
-    }
-}
-
-fn next_down(x: f64) -> f64 {
-    if x.is_nan() || x == f64::NEG_INFINITY {
-        return x;
-    }
-    if x == 0.0 {
-        return f64::from_bits(0x8000_0000_0000_0001);
-    }
-    if x > 0.0 {
-        f64::from_bits(x.to_bits() - 1)
-    } else {
-        f64::from_bits(x.to_bits() + 1)
-    }
+    let pad = 1e-6 * (phi.abs() + r.abs() + 1.0);
+    (phi - r - pad, phi + r + pad)
 }
 
 fn exact_distance2(vectors: &[f32], id: usize, dim: usize, q: &[f64]) -> f64 {
@@ -990,13 +966,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn next_up_down_step_one_ulp() {
-        assert!(next_up(1.0) > 1.0);
-        assert!(next_down(1.0) < 1.0);
-        assert!(next_up(-1.0) > -1.0);
-        assert!(next_down(-1.0) < -1.0);
-        assert_eq!(next_up(f64::INFINITY), f64::INFINITY);
-        assert_eq!(next_down(f64::NEG_INFINITY), f64::NEG_INFINITY);
+    fn scan_window_covers_rounding_and_non_finite_phi() {
+        let phi = 1024.0f64;
+        let r = 1023.9999999990687f64;
+        let x = 9.313222970597224e-10f64;
+        let (lower, upper) = scan_window(phi, r);
+        assert!(lower <= x && x <= upper);
+        let (lower, upper) = scan_window(f64::NAN, r);
+        assert_eq!(lower, f64::NEG_INFINITY);
+        assert_eq!(upper, f64::INFINITY);
+        let (lower, upper) = scan_window(phi, f64::INFINITY);
+        assert_eq!(lower, f64::NEG_INFINITY);
+        assert_eq!(upper, f64::INFINITY);
     }
     #[test]
     fn fast_stage_dot_matches_naive_channels() {
