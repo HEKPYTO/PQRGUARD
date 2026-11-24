@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use axum::extract::{DefaultBodyLimit, Request, State};
@@ -14,17 +15,33 @@ use axum::routing::{get, post};
 use axum::Router;
 use clap::Parser;
 use pqr_core::certificate::{Certificate, Degraded, DegradedReason, Status, Target};
-use pqr_core::index::{IndexError, PqrIndex, QueryOptions, QueryOutcome};
+use pqr_core::index::{IndexError, PqrIndex, QueryOptions, QueryOutcome, StageEps};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
 use tower::limit::ConcurrencyLimitLayer;
 
-const ROUTES: [&str; 6] = ["/healthz", "/readyz", "/metrics", "/v1/query", "/admin/reload", "other"];
+const ROUTES: [&str; 6] = [
+    "/healthz",
+    "/readyz",
+    "/metrics",
+    "/v1/query",
+    "/admin/reload",
+    "other",
+];
 const STATUS_CLASSES: [&str; 3] = ["2xx", "4xx", "5xx"];
 const ERROR_REASONS: [&str; 4] = ["auth", "timeout", "client", "server"];
 const BUCKET_LIMITS: [&str; 8] = ["0.001", "0.005", "0.01", "0.05", "0.1", "0.5", "1", "+Inf"];
 const BUCKET_MICROS: [u64; 7] = [1_000, 5_000, 10_000, 50_000, 100_000, 500_000, 1_000_000];
+const MAX_EPS_ENTRIES: usize = 1024;
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct EpsKey {
+    index_id: String,
+    k: usize,
+    tau: u64,
+    delta: u64,
+}
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -135,7 +152,9 @@ fn hex_digit(byte: u8) -> Result<u8, Error> {
         b'0'..=b'9' => Ok(byte - b'0'),
         b'a'..=b'f' => Ok(byte - b'a' + 10),
         b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err(Error::Config("seed contains a non-hex character".to_string())),
+        _ => Err(Error::Config(
+            "seed contains a non-hex character".to_string(),
+        )),
     }
 }
 
@@ -242,6 +261,7 @@ pub struct AppState {
     seed: [u8; 32],
     config: Config,
     metrics: Arc<Metrics>,
+    eps_cache: Mutex<HashMap<EpsKey, StageEps>>,
 }
 
 impl AppState {
@@ -251,6 +271,7 @@ impl AppState {
             ready: AtomicBool::new(true),
             seed,
             config,
+            eps_cache: Mutex::new(HashMap::new()),
             metrics: Arc::new(Metrics::default()),
         }
     }
@@ -271,6 +292,25 @@ impl AppState {
         *self.index.write().expect("index lock poisoned") = Arc::new(index);
         self.ready.store(true, Ordering::Release);
         Ok(())
+    }
+
+    fn stage_eps(&self, index: &PqrIndex, target: &Target) -> Result<StageEps, IndexError> {
+        let key = EpsKey {
+            index_id: index.index_id().to_string(),
+            k: target.k(),
+            tau: target.tau().to_bits(),
+            delta: target.delta().to_bits(),
+        };
+        if let Some(token) = self.eps_cache.lock().expect("eps lock poisoned").get(&key) {
+            return Ok(token.clone());
+        }
+        let token = index.stage_eps(target)?;
+        let mut cache = self.eps_cache.lock().expect("eps lock poisoned");
+        if cache.len() >= MAX_EPS_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(key, token.clone());
+        Ok(token)
     }
 
     fn live_index(&self) -> Option<Arc<PqrIndex>> {
@@ -337,12 +377,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/query", post(query_handler))
         .route("/admin/reload", post(reload_handler))
         .route("/metrics", get(metrics_handler))
-        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ));
     let open = Router::new()
         .route("/healthz", get(health_handler))
         .route("/readyz", get(ready_handler));
     open.merge(protected)
-        .layer(middleware::from_fn_with_state(state.clone(), observe_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            observe_middleware,
+        ))
         .layer(ConcurrencyLimitLayer::new(state.config.max_concurrency))
         .layer(DefaultBodyLimit::max(state.config.max_body_bytes))
         .with_state(state)
@@ -362,7 +408,10 @@ async fn ready_handler(State(state): State<Arc<AppState>>) -> Response {
 
 async fn metrics_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         state.metrics.render(),
     )
 }
@@ -432,17 +481,22 @@ async fn query_handler(
     } else {
         Vec::new()
     };
-    let options = QueryOptions {
-        target,
-        nprobe: request.nprobe,
-        reasons,
-        stage_eps: None,
-    };
+    let nprobe = request.nprobe;
     let query = request.query;
+    let worker = state.clone();
     let timeout = Duration::from_millis(state.config.query_timeout_ms);
     let outcome = tokio::time::timeout(
         timeout,
-        tokio::task::spawn_blocking(move || index.query(&query, &options)),
+        tokio::task::spawn_blocking(move || {
+            let stage_eps = worker.stage_eps(&index, &target)?;
+            let options = QueryOptions {
+                target,
+                nprobe,
+                reasons,
+                stage_eps: Some(stage_eps),
+            };
+            index.query(&query, &options)
+        }),
     )
     .await;
     let outcome = match outcome {
@@ -459,8 +513,18 @@ async fn query_handler(
                 _ => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "query failed"),
             })
         }
-        Ok(Err(_)) => return Err(ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "query failed")),
-        Err(_) => return Err(ApiError::new(StatusCode::GATEWAY_TIMEOUT, "query timed out")),
+        Ok(Err(_)) => {
+            return Err(ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "query failed",
+            ))
+        }
+        Err(_) => {
+            return Err(ApiError::new(
+                StatusCode::GATEWAY_TIMEOUT,
+                "query timed out",
+            ))
+        }
     };
     let response = match outcome {
         QueryOutcome::Certified { hits, certificate } => QueryResponse {
@@ -487,7 +551,8 @@ async fn reload_handler(State(state): State<Arc<AppState>>) -> Response {
             tracing::warn!(error = %error, "index reload rejected");
             ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "index reload failed").into_response()
         }
-        Err(_) => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "index reload failed")
-            .into_response(),
+        Err(_) => {
+            ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "index reload failed").into_response()
+        }
     }
 }
