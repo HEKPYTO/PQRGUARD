@@ -50,6 +50,8 @@ Successful query response:
 
 A degraded query returns `"status":"degraded"` and a `degraded` object with reasons. The `certificate` key is absent; no response is ever upgraded from degraded to certified. `k`, `tau`, `delta`, and `nprobe` are validated against the core target rules and the configured bounds. NaN, infinite values, dimension mismatch, malformed JSON, unknown fields, and oversized bodies are rejected.
 
+Stage epsilon bounds are derived once per `(index_id, target)` on the server, cached, and passed to the core as an opaque token. Clients cannot supply or observe them; weak or mismatched tokens are rejected by the core.
+
 ## Auth and TLS boundary
 
 When `PQR_API_TOKEN` is set, `/v1/query`, `/admin/reload`, and `/metrics` require `Authorization: Bearer <token>`. Comparison is constant time for equal-length tokens; token length is not treated as secret. Health and readiness probes stay public for orchestrators.

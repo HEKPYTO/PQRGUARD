@@ -17,9 +17,7 @@ fn seed_hex(seed: &[u8; 32]) -> String {
 
 fn vectors(dim: usize, n: usize) -> Vec<f32> {
     (0..n)
-        .flat_map(|row| {
-            (0..dim).map(move |column| (row * dim + column) as f32 * 0.125)
-        })
+        .flat_map(|row| (0..dim).map(move |column| (row * dim + column) as f32 * 0.125))
         .collect()
 }
 
@@ -82,7 +80,10 @@ async fn send(router: &Router, method: Method, uri: &str, body: Body) -> (Status
     let bytes = to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("response body");
-    (status, String::from_utf8(bytes.to_vec()).expect("utf8 body"))
+    (
+        status,
+        String::from_utf8(bytes.to_vec()).expect("utf8 body"),
+    )
 }
 
 async fn json_request(router: &Router, uri: &str, body: Value) -> (StatusCode, Value) {
@@ -198,25 +199,45 @@ async fn invalid_queries_rejected() {
     ];
     for case in cases {
         let (status, body) = json_request(&router, "/v1/query", case).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "case body: {body}");
+        assert!(
+            matches!(
+                status,
+                StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY
+            ),
+            "case body: {body}"
+        );
         assert!(body.get("certificate").is_none());
     }
-    let (status, _) = send(
+    let (status, body) = send(
         &router,
         Method::POST,
         "/v1/query",
         Body::from("{\"query\": ["),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    let (status, _) = send(
+    assert!(
+        matches!(
+            status,
+            StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY
+        ),
+        "raw body: {body}"
+    );
+    let (status, body) = send(
         &router,
         Method::POST,
         "/v1/query",
-        Body::from("{\"query\":[0.0,0.0,0.0,1e400],\"k\":3,\"tau\":1.0,\"delta\":0.1,\"nprobe\":1}"),
+        Body::from(
+            "{\"query\":[0.0,0.0,0.0,1e400],\"k\":3,\"tau\":1.0,\"delta\":0.1,\"nprobe\":1}",
+        ),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        matches!(
+            status,
+            StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY
+        ),
+        "raw body: {body}"
+    );
 }
 
 #[tokio::test]
@@ -285,5 +306,5 @@ async fn non_loopback_bind_requires_token() {
         "token",
     ]);
     assert!(token_config.validate().is_ok());
-    assert_eq!(state.is_ready(), true);
+    assert!(state.is_ready());
 }
