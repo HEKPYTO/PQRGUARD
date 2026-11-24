@@ -679,7 +679,19 @@ mod tests {
 
     #[test]
     fn npy_shape_must_fit_file() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/q.npy");
+        use npyz::WriterBuilder;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("q.npy");
+        let mut writer = npyz::WriteOptions::<f32>::new()
+            .default_dtype()
+            .shape(&[20, 16])
+            .writer(fs::File::create(&path).unwrap())
+            .begin_nd()
+            .unwrap();
+        writer.extend(std::iter::repeat_n(0f32, 320)).unwrap();
+        writer.finish().unwrap();
+
         let bytes = fs::read(path).unwrap();
         assert!(checked_npy(&bytes, 4).is_ok());
         assert!(checked_npy(&bytes, 8).is_err());
