@@ -25,7 +25,7 @@ build/test commands use `--locked`.
   uploads `bench-report`, and fails on any gate breach.
 - `release.yml` — runs on tags `v*` or `workflow_dispatch`. Builds `pqrguard`
   and `pqr-serve` for `x86_64-unknown-linux-gnu` (native) and
-  `aarch64-unknown-linux-gnu` (via `cross`, which needs Docker). Each build
+  `aarch64-unknown-linux-gnu` on the native `ubuntu-24.04-arm` runner. Each build
   publishes `pqr-binaries-<target>` with both binaries and one SBOM per binary.
   The `package` job downloads both artifacts and publishes unsigned
   `release-assets` containing four binaries, four SBOMs, `Cargo.lock`, and
@@ -95,8 +95,8 @@ if using a fork.
 `cargo install` steps compile pinned tool versions and need network access to
 crates.io. `cargo deny check` and `cargo audit` fetch the RustSec advisory
 database. GitHub artifact attestations are free on public repositories; a
-private repository needs GitHub Advanced Security. `cross` needs Docker,
-available on `ubuntu-latest`.
+private repository needs GitHub Advanced Security. The arm64 build uses the
+public `ubuntu-24.04-arm` runner.
 
 `benchmark.yml` needs outbound FTP access to `ftp.irisa.fr` for
 `fetch_sift.sh`, enough RAM for the 1M graph (reference machine: 24 GB), and a
