@@ -281,3 +281,32 @@ fn out_of_distribution_queries_stay_correct() {
         assert_eq!(got, truth, "offset {offset}");
     }
 }
+
+#[test]
+fn all_visited_large_index_query_does_not_panic() {
+    let dim = 8;
+    let vectors = data(100_000, dim);
+    let cfg = BuildConfig {
+        partitions: 4,
+        stages: vec![dim],
+        iterations: 1,
+    };
+    let (index, _) = PqrIndex::build(&vectors, dim, &cfg, &[7u8; 32]).unwrap();
+    let outcome = index
+        .query(
+            &vectors[..dim],
+            &QueryOptions {
+                target: Target::new(1, 1.0, 0.01).unwrap(),
+                nprobe: 8,
+                reasons: Vec::new(),
+                stage_eps: None,
+            },
+        )
+        .unwrap();
+    let QueryOutcome::Certified { hits, .. } = outcome else {
+        panic!("expected certified");
+    };
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id, 0);
+    assert_eq!(hits[0].distance2, 0.0);
+}
