@@ -104,7 +104,9 @@ service cap memory at `2048M`. Do not rely on swap for latency.
   query task and includes time spent waiting for a blocking-pool worker.
   Timeout returns 504 with no certificate and increments
   `pqr_http_errors_total{reason="timeout"}`. Set it below the proxy and client
-  deadlines.
+  deadlines. A timeout stops the HTTP wait, not the blocking query: admitted
+  scans can run to completion after the 504, so size concurrency and proxy rate
+  limits for worst-case work rather than treating the timeout as cancellation.
 - `PQR_MAX_BODY_BYTES` (default 65536) caps the body before JSON parsing.
 - `PQR_MAX_K` and `PQR_MAX_NPROBE`, plus the index dimension and live vector
   count, bound accepted queries. Rejected input returns 400 with no
