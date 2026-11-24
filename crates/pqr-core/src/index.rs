@@ -4,7 +4,7 @@ use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use rand::Rng;
+use rand::RngExt;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
