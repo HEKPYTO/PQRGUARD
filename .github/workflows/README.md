@@ -2,13 +2,13 @@
 
 ## Permissions and pinning
 
-All workflows use `permissions: contents: read` by default. The release
-`package` job escalates to `attestations: write` and `id-token: write` for
-build provenance and keyless signing; the `publish` job gets `contents: write`
-and `attestations: read` to attach provenance bundles to a GitHub Release. No
-secrets are used. Every `uses` step is pinned to a full commit SHA. Checkouts
-set `persist-credentials: false`, and all Cargo build/test commands use
-`--locked`.
+All workflows use `permissions: contents: read` by default. The release `sign`
+job, which runs only for tag pushes, escalates to `attestations: write` and
+`id-token: write` for build provenance and keyless signing; the `publish` job
+gets `contents: write` and `attestations: read` to attach provenance bundles to
+a GitHub Release. No secrets are used. Every `uses` step is pinned to a full
+commit SHA. Checkouts set `persist-credentials: false`, and all Cargo
+build/test commands use `--locked`.
 
 ## Workflows
 
@@ -27,18 +27,23 @@ set `persist-credentials: false`, and all Cargo build/test commands use
   and `pqr-serve` for `x86_64-unknown-linux-gnu` (native) and
   `aarch64-unknown-linux-gnu` (via `cross`, which needs Docker). Each build
   publishes `pqr-binaries-<target>` with both binaries and one SBOM per binary.
-  The `package` job downloads both artifacts and publishes `release-assets`
-  containing four binaries, four SBOMs, `Cargo.lock`, `SHA256SUMS`, and one
-  Sigstore bundle (`*.sigstore.json`) per file. On `v*` tags the `publish` job
-  downloads `release-assets`, downloads one build-provenance attestation bundle
+  The `package` job downloads both artifacts and publishes unsigned
+  `release-assets` containing four binaries, four SBOMs, `Cargo.lock`, and
+  `SHA256SUMS`. On `v*` tag pushes only, the `sign` job attests and signs those
+  files and publishes `signed-release-assets` with one Sigstore bundle
+  (`*.sigstore.json`) per file. The tag-only `publish` job downloads
+  `signed-release-assets`, downloads one build-provenance attestation bundle
   (`sha256-*.jsonl`) per release subject, and creates a GitHub Release whose
-  assets include those bundles. `workflow_dispatch` only publishes workflow
-  artifacts.
+  assets include those bundles. `workflow_dispatch` only builds and packages
+  unsigned workflow artifacts; it produces no signatures, attestations, or
+  Release.
 
 ## Verify a release artifact
 
-Download the assets from the GitHub Release into `dist/`. Replace
-`HEKPYTO/PQRGUARD` with the repository if using a fork.
+Download the assets from a GitHub Release created by a `v*` tag push into
+`dist/`. Manual `workflow_dispatch` artifacts are unsigned; only tag builds
+produce signed Release assets. Replace `HEKPYTO/PQRGUARD` with the repository
+if using a fork.
 
 1. Download the assets from the GitHub Release:
 
@@ -61,7 +66,7 @@ Download the assets from the GitHub Release into `dist/`. Replace
      cosign verify-blob \
        --bundle "$file.sigstore.json" \
        --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-       --certificate-identity-regexp '^https://github\.com/HEKPYTO/PQRGUARD/\.github/workflows/release\.yml@refs/(tags|heads)/' \
+       --certificate-identity-regexp '^https://github\.com/HEKPYTO/PQRGUARD/\.github/workflows/release\.yml@refs/tags/' \
        "$file"
    done
    ```
