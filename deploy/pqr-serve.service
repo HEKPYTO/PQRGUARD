@@ -1,0 +1,38 @@
+[Unit]
+Description=pqr-serve HTTP frontend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pqr
+Group=pqr
+ExecStart=/usr/local/bin/pqr-serve
+ExecReload=/bin/kill -HUP $MAINPID
+EnvironmentFile=/etc/pqr/pqr-serve.env
+Restart=on-failure
+RestartSec=2s
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+PrivateTmp=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+ReadOnlyPaths=/var/lib/pqr
+UMask=0077
+LimitNOFILE=65536
+LimitNPROC=512
+TasksMax=256
+MemoryMax=512M
+CPUQuota=100%
+
+[Install]
+WantedBy=multi-user.target

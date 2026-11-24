@@ -1,0 +1,45 @@
+name: pqr-guard
+services:
+  pqr-serve:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: pqr-serve:local
+    restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      PQR_BIND: 0.0.0.0:8080
+      PQR_INDEX: /var/lib/pqr/index
+      PQR_SEED_FILE: /run/secrets/pqr_seed
+      PQR_API_TOKEN: ${PQR_API_TOKEN:?set PQR_API_TOKEN}
+      RUST_LOG: info
+    secrets:
+      - pqr_seed
+    volumes:
+      - type: bind
+        source: ${PQR_INDEX_DIR:?set PQR_INDEX_DIR}
+        target: /var/lib/pqr/index
+        read_only: true
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+secrets:
+  pqr_seed:
+    file: ${PQR_SEED_FILE:?set PQR_SEED_FILE}
