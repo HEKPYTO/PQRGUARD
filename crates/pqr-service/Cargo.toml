@@ -1,0 +1,25 @@
+[package]
+name = "pqr-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "pqr-serve"
+path = "src/main.rs"
+
+[dependencies]
+pqr-core.workspace = true
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+clap = { workspace = true, features = ["env"] }
+tower = { version = "0.5", features = ["limit", "util"] }
+
+[dev-dependencies]
+tempfile.workspace = true
