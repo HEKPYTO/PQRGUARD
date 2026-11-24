@@ -10,7 +10,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 pqr-core = { path = "crates/pqr-core" }
-rand = "0.9"
+rand = "0.10"
 rand_chacha = "0.9"
 rand_distr = "0.5"
 libc = "0.2"
