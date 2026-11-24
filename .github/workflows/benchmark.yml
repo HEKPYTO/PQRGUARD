@@ -69,7 +69,8 @@ jobs:
             --nprobe 1 --repeat 1 --baseline usearch-hnsw \
             --hnsw-cache fixtures/sift1m.usearch \
             --report "$PQR_BENCH_DIR/bootstrap.json"
-          actual=$(shasum -a 256 fixtures/sift1m.usearch | awk '{print $1}')
+          actual=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' fixtures/sift1m.usearch)
+          echo "hnsw cache sha256: $actual"
           test "$actual" = "c49c9ad5b3671200b18d58a9b49e73eaaf7ca7ae73d126e446676f95495d11fe"
       - name: Run 1M benchmark
         run: |
