@@ -99,8 +99,9 @@ The 10k latency gate passes. The paper reports 2.5x HNSW with AVX-512 C++
 kernels. This portable Rust v0.1 uses byte lookup tables with eight independent
 accumulators and an in-memory scan; its measured ratio is 3.09x on SIFT10k.
 On SIFT1M (100 partitions, one 128-bit stage, nprobe=1) the build took 83 s; a
-certified query took 20.60 ms p50 versus 0.629 ms for USearch HNSW at recall
-0.998, a ratio of 32.7x. The 4x gate is **not met at 1M**. The 1M index is
+certified query took 20.60 ms p50 versus 0.629 ms for USearch HNSW at
+efSearch 128, recall 0.998, using `fixtures/sift1m.usearch` (the bench rebuilds
+it deterministically when absent), a ratio of 32.7x. The 4x gate is **not met at 1M**. The 1M index is
 564 MB for 512 MB of raw vectors, or 1.10x raw. A 100M run needs a
 disk-backed build: 100M x 128 fp32 is 51.2 GB of raw vectors against 24 GB of
 host RAM, and the public SIFT bundle stops at 1M.
