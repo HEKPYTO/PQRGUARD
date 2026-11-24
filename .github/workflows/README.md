@@ -11,22 +11,23 @@ use `--locked`.
 
 ## Workflows
 
-- `ci.yml` — format, clippy, tests, `cargo deny check`, `cargo audit`, a
-  CycloneDX SBOM, and a fast `bench-syntax` job (`bash -n`, Python compile,
-  CLI `--help`). Publishes artifact `sbom` with `sbom.cdx.json` and
-  `Cargo.lock`. `cargo-cyclonedx` 0.5.10 has no `--output` flag;
-  `--override-filename sbom.cdx` produces the same `sbom.cdx.json` file.
+- `ci.yml` — format, clippy, tests, `cargo deny check`, `cargo audit`, two
+  CycloneDX binary SBOMs, and a fast `bench-syntax` job (`bash -n`, Python
+  compile, CLI `--help`). Publishes artifact `sbom` with
+  `sbom-pqrguard.cdx.json`, `sbom-pqr-serve.cdx.json`, and `Cargo.lock`.
+  `cargo-cyclonedx --describe binaries` emits one SBOM per binary in the
+  workspace, covering both shipped binaries.
 - `nightly.yml` — scheduled certified audit with a generated fixture.
 - `benchmark.yml` — nightly and manual 1M contract. Caches SIFT fixtures,
   runs `benchmarks/fetch_sift.sh`, bootstraps the pinned HNSW cache on a cold
   cache, calls `benchmarks/run_1m.sh` (`--reuse-index` when an index exists),
   uploads `bench-report`, and fails on any gate breach.
-- `release.yml` — runs on tags `v*` or `workflow_dispatch`. Builds
-  `pqrguard` for `x86_64-unknown-linux-gnu` (native) and
+- `release.yml` — runs on tags `v*` or `workflow_dispatch`. Builds `pqrguard`
+  and `pqr-serve` for `x86_64-unknown-linux-gnu` (native) and
   `aarch64-unknown-linux-gnu` (via `cross`, which needs Docker). Each build
-  publishes `pqrguard-<target>` with the binary and a target-specific SBOM.
+  publishes `pqr-binaries-<target>` with both binaries and one SBOM per binary.
   The `package` job downloads both artifacts and publishes `release-assets`
-  containing both binaries, both SBOMs, `Cargo.lock`, `SHA256SUMS`, and one
+  containing four binaries, four SBOMs, `Cargo.lock`, `SHA256SUMS`, and one
   Sigstore bundle (`*.sigstore.json`) per file. GitHub build provenance
   attestations are attached to the workflow run, not to a GitHub Release.
 
@@ -46,7 +47,7 @@ Replace `HEKPYTO/PQRGUARD` with the repository if using a fork.
    and transparency-log proof):
 
    ```sh
-   for file in pqrguard-* sbom-*.cdx.json Cargo.lock SHA256SUMS; do
+   for file in pqrguard-* pqr-serve-* sbom-*.cdx.json Cargo.lock SHA256SUMS; do
      cosign verify-blob \
        --bundle "$file.sigstore.json" \
        --certificate-oidc-issuer https://token.actions.githubusercontent.com \
@@ -58,10 +59,12 @@ Replace `HEKPYTO/PQRGUARD` with the repository if using a fork.
 3. GitHub build provenance:
 
    ```sh
-   gh attestation verify dist/pqrguard-x86_64-unknown-linux-gnu \
-     --repo HEKPYTO/PQRGUARD \
-     --signer-workflow HEKPYTO/PQRGUARD/.github/workflows/release.yml
-   ```
+   for file in pqrguard-x86_64-unknown-linux-gnu pqr-serve-x86_64-unknown-linux-gnu \
+     pqrguard-aarch64-unknown-linux-gnu pqr-serve-aarch64-unknown-linux-gnu; do
+     gh attestation verify "dist/$file" \
+       --repo HEKPYTO/PQRGUARD \
+       --signer-workflow HEKPYTO/PQRGUARD/.github/workflows/release.yml
+   done
 
 4. SBOM contents:
 
