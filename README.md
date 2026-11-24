@@ -133,6 +133,7 @@ bundle stops at 1M.
 | Service runbook: deploy, auth, capacity, reload, backup, incidents | [`crates/pqr-service/README.md`](crates/pqr-service/README.md) |
 | Operations detail: [threat model](crates/pqr-service/README.md#threat-model), [backup and recovery](crates/pqr-service/README.md#backup-and-recovery), [observability](crates/pqr-service/README.md#observability), [incident response](crates/pqr-service/README.md#incident-response) | [`crates/pqr-service/README.md`](crates/pqr-service/README.md) |
 | Benchmark contract and gates | [`benchmarks/README.md`](benchmarks/README.md) |
+| Container, Compose, and systemd deployment | [`deploy/README.md`](deploy/README.md) |
 | Release artifact verification: checksums, signatures, attestations, SBOM | [`.github/workflows/README.md#verify-a-release-artifact`](.github/workflows/README.md#verify-a-release-artifact) |
 
 The service has no built-in TLS and certificates carry no signature. Terminate
