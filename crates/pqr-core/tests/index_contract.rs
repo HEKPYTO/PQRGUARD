@@ -1,5 +1,8 @@
 use pqr_core::certificate::{DegradedReason, Target};
-use pqr_core::index::{BuildConfig, IndexError, PqrIndex, QueryOptions, QueryOutcome};
+use pqr_core::index::{
+    BuildConfig, IndexError, PqrIndex, QueryOptions, QueryOutcome, MAX_INDEX_DIM,
+    MAX_INDEX_FILE_BYTES, MAX_INDEX_N,
+};
 
 fn data(n: usize, dim: usize) -> Vec<f32> {
     let mut state = 0x9e3779b97f4a7c15u64;
@@ -207,6 +210,7 @@ fn audit_is_falsification_only_and_reports_trials() {
     let original_id = index.index_id().to_string();
     let report = audit(&mut index, &queries, target, &cfg, None).unwrap();
     assert_eq!(report.index_id, original_id);
+    assert_ne!(index.index_id(), original_id);
     assert_eq!(report.trials, 20 * 100);
     assert_eq!(report.inference, "falsification-only");
     assert_eq!(report.verdict, "pass");
@@ -396,4 +400,103 @@ fn duplicate_distances_use_lowest_ids() {
     let ids: Vec<u64> = hits.iter().map(|h| h.id).collect();
     assert_eq!(ids, vec![0, 1, 2, 3]);
     assert_eq!(brute(&vectors, dim, &[0.0; 4], 4), vec![0, 1, 2, 3]);
+}
+
+#[test]
+fn atomic_save_replaces_index_without_mixed_files() {
+    use std::fs;
+    let dim = 12;
+    let (first, vectors) = build(dim);
+    let cfg = BuildConfig {
+        partitions: 30,
+        stages: vec![dim / 2, dim],
+        iterations: 8,
+    };
+    let (second, _) = PqrIndex::build(&vectors, dim, &cfg, &[9u8; 32]).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    first.save(dir.path()).unwrap();
+    let first_id = first.index_id().to_string();
+
+    fs::remove_file(dir.path().join("codes.u64")).unwrap();
+    assert!(PqrIndex::load(dir.path(), &[7u8; 32]).is_err());
+
+    second.save(dir.path()).unwrap();
+    let loaded = PqrIndex::load(dir.path(), &[9u8; 32]).unwrap();
+    assert_eq!(loaded.index_id(), second.index_id());
+    assert_ne!(loaded.index_id(), first_id);
+    assert!(matches!(
+        PqrIndex::load(dir.path(), &[7u8; 32]),
+        Err(IndexError::SeedMismatch)
+    ));
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 10);
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_save_preserves_previous_index() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    let dim = 12;
+    let (index, _) = build(dim);
+    let outer = tempfile::tempdir().unwrap();
+    let dir = outer.path().join("index");
+    index.save(&dir).unwrap();
+    let before = PqrIndex::load(&dir, &[7u8; 32]).unwrap();
+
+    let mut permissions = fs::metadata(outer.path()).unwrap().permissions();
+    permissions.set_mode(0o500);
+    fs::set_permissions(outer.path(), permissions.clone()).unwrap();
+    let result = index.save(&dir);
+    let mut restored = permissions;
+    restored.set_mode(0o700);
+    fs::set_permissions(outer.path(), restored).unwrap();
+
+    assert!(result.is_err());
+    let after = PqrIndex::load(&dir, &[7u8; 32]).unwrap();
+    assert_eq!(after.index_id(), before.index_id());
+}
+
+#[test]
+fn index_load_rejects_oversized_manifest_fields() {
+    use std::fs;
+    let dim = 12;
+    let (index, _) = build(dim);
+    let dir = tempfile::tempdir().unwrap();
+    index.save(dir.path()).unwrap();
+    let path = dir.path().join("manifest.json");
+    let original = fs::read(&path).unwrap();
+    for (field, value) in [
+        ("dim", MAX_INDEX_DIM + 1),
+        ("n", MAX_INDEX_N + 1),
+        ("partitions", MAX_INDEX_N + 1),
+    ] {
+        let mut manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        manifest[field] = serde_json::json!(value);
+        fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert!(
+            matches!(
+                PqrIndex::load(dir.path(), &[7u8; 32]),
+                Err(IndexError::Limit(_))
+            ),
+            "{field} was accepted"
+        );
+    }
+}
+
+#[test]
+fn index_load_checks_file_bytes_before_read() {
+    use std::fs;
+    let dim = 12;
+    let (index, _) = build(dim);
+    let dir = tempfile::tempdir().unwrap();
+    index.save(dir.path()).unwrap();
+    let path = dir.path().join("vectors.f32");
+    fs::File::create(&path)
+        .unwrap()
+        .set_len(MAX_INDEX_FILE_BYTES + 1)
+        .unwrap();
+    assert!(matches!(
+        PqrIndex::load(dir.path(), &[7u8; 32]),
+        Err(IndexError::Limit(_))
+    ));
 }
