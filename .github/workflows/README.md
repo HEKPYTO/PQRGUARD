@@ -5,9 +5,10 @@
 All workflows use `permissions: contents: read` by default. The release
 `package` job escalates to `attestations: write` and `id-token: write` for
 build provenance and keyless signing; the `publish` job gets `contents: write`
-to create a GitHub Release. No secrets are used. Every `uses` step is pinned
-to a full commit SHA. Checkouts set `persist-credentials: false`, and all
-Cargo build/test commands use `--locked`.
+and `attestations: read` to attach provenance bundles to a GitHub Release. No
+secrets are used. Every `uses` step is pinned to a full commit SHA. Checkouts
+set `persist-credentials: false`, and all Cargo build/test commands use
+`--locked`.
 
 ## Workflows
 
@@ -29,9 +30,10 @@ Cargo build/test commands use `--locked`.
   The `package` job downloads both artifacts and publishes `release-assets`
   containing four binaries, four SBOMs, `Cargo.lock`, `SHA256SUMS`, and one
   Sigstore bundle (`*.sigstore.json`) per file. On `v*` tags the `publish` job
-  downloads `release-assets` and creates a GitHub Release with those assets.
-  `workflow_dispatch` only publishes workflow artifacts. GitHub build
-  provenance attestations stay attached to the workflow run, not the Release.
+  downloads `release-assets`, downloads one build-provenance attestation bundle
+  (`sha256-*.jsonl`) per release subject, and creates a GitHub Release whose
+  assets include those bundles. `workflow_dispatch` only publishes workflow
+  artifacts.
 
 ## Verify a release artifact
 
@@ -64,15 +66,18 @@ Download the assets from the GitHub Release into `dist/`. Replace
    done
    ```
 
-4. GitHub build provenance:
+4. GitHub build provenance, using the JSONL bundles downloaded from the
+   Release. Each bundle is named for its artifact digest:
 
    ```sh
-   for file in pqrguard-x86_64-unknown-linux-gnu pqr-serve-x86_64-unknown-linux-gnu \
-     pqrguard-aarch64-unknown-linux-gnu pqr-serve-aarch64-unknown-linux-gnu; do
-     gh attestation verify "dist/$file" \
+   for file in pqrguard-* pqr-serve-* sbom-*.cdx.json Cargo.lock SHA256SUMS; do
+     bundle="sha256-$(sha256sum "$file" | cut -d' ' -f1).jsonl"
+     gh attestation verify "$file" \
        --repo HEKPYTO/PQRGUARD \
+       --bundle "$bundle" \
        --signer-workflow HEKPYTO/PQRGUARD/.github/workflows/release.yml
    done
+   ```
 
 5. SBOM contents:
 

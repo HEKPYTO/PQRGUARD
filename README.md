@@ -141,6 +141,23 @@ TLS at a proxy, prefer file or KMS seed custody over environment variables, and
 treat certificates as self-consistent claims rather than authenticated
 attestations.
 
+## Maintenance
+
+PQRGUARD is a public repository at
+[`HEKPYTO/PQRGUARD`](https://github.com/HEKPYTO/PQRGUARD). Repository owner
+[@HEKPYTO](https://github.com/HEKPYTO) owns releases and dependency updates;
+weekly Dependabot PRs cover Cargo and GitHub Actions and are assigned to
+`HEKPYTO` in [`dependabot.yml`](.github/dependabot.yml).
+
+Monitor `/healthz` for liveness, `/readyz` for readiness, and `/metrics` for
+Prometheus text; configure service alerts from the thresholds in the
+[service observability runbook](crates/pqr-service/README.md#observability).
+Roll back by repointing `PQR_INDEX` at the previous known-good index and
+reloading, as described in [`deploy/README.md`](deploy/README.md) and the
+[service rollback runbook](crates/pqr-service/README.md#graceful-reload-and-rollback).
+Report security issues privately to `@HEKPYTO` through GitHub Security
+Advisories; do not open a public issue.
+
 ## Development
 
 ```sh
