@@ -503,7 +503,52 @@ fn index_load_checks_file_bytes_before_read() {
 
 #[cfg(unix)]
 #[test]
-fn load_recovers_backup_after_interrupted_swap() {
+fn load_works_on_a_read_only_index_tree() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    let (index, _) = build(12);
+    let outer = tempfile::tempdir().unwrap();
+    let dir = outer.path().join("index");
+    index.save(&dir).unwrap();
+    // save leaves its lock file; remove it so load must open the read-only parent.
+    fs::remove_file(outer.path().join(".pqr-index.lock")).unwrap();
+
+    let mut dir_mode = fs::metadata(&dir).unwrap().permissions();
+    dir_mode.set_mode(0o550);
+    let mut parent_mode = fs::metadata(outer.path()).unwrap().permissions();
+    parent_mode.set_mode(0o550);
+    for entry in fs::read_dir(&dir).unwrap() {
+        let entry = entry.unwrap();
+        let mut mode = entry.metadata().unwrap().permissions();
+        mode.set_mode(0o440);
+        fs::set_permissions(entry.path(), mode).unwrap();
+    }
+    fs::set_permissions(&dir, dir_mode).unwrap();
+    fs::set_permissions(outer.path(), parent_mode).unwrap();
+
+    let loaded = PqrIndex::load(&dir, &[7u8; 32]);
+    let lock_created = outer.path().join(".pqr-index.lock").exists();
+
+    let mut writable = fs::metadata(outer.path()).unwrap().permissions();
+    writable.set_mode(0o700);
+    fs::set_permissions(outer.path(), writable).unwrap();
+    let mut writable = fs::metadata(&dir).unwrap().permissions();
+    writable.set_mode(0o700);
+    fs::set_permissions(&dir, writable).unwrap();
+    for entry in fs::read_dir(&dir).unwrap() {
+        let entry = entry.unwrap();
+        let mut mode = entry.metadata().unwrap().permissions();
+        mode.set_mode(0o600);
+        fs::set_permissions(entry.path(), mode).unwrap();
+    }
+
+    assert_eq!(loaded.unwrap().index_id(), index.index_id());
+    assert!(!lock_created);
+}
+
+#[cfg(unix)]
+#[test]
+fn load_leaves_interrupted_swap_for_next_save() {
     use std::fs;
     let (index, _) = build(12);
     let outer = tempfile::tempdir().unwrap();
@@ -511,13 +556,22 @@ fn load_recovers_backup_after_interrupted_swap() {
     index.save(&dir).unwrap();
     let backup = outer.path().join(".pqr-backup-index");
     fs::rename(&dir, &backup).unwrap();
-    fs::create_dir_all(outer.path().join(".pqr-save-stale")).unwrap();
+    let staging = outer.path().join(".pqr-save-stale");
+    fs::create_dir_all(&staging).unwrap();
 
-    let loaded = PqrIndex::load(&dir, &[7u8; 32]).unwrap();
-    assert_eq!(loaded.index_id(), index.index_id());
+    assert!(PqrIndex::load(&dir, &[7u8; 32]).is_err());
+    assert!(backup.is_dir());
+    assert!(staging.is_dir());
+    assert!(!dir.exists());
+
+    index.save(&dir).unwrap();
+    assert_eq!(
+        PqrIndex::load(&dir, &[7u8; 32]).unwrap().index_id(),
+        index.index_id()
+    );
     assert!(!backup.exists());
-    assert!(!outer.path().join(".pqr-save-stale").exists());
-    assert!(dir.exists());
+    assert!(!staging.exists());
+    assert!(dir.is_dir());
 }
 
 #[cfg(unix)]
