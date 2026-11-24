@@ -125,6 +125,20 @@ of raw vectors, or 1.10x raw. A 100M run needs a disk-backed build: 100M x 128
 fp32 is 51.2 GB of raw vectors against 24 GB of host RAM, and the public SIFT
 bundle stops at 1M.
 
+## Production
+
+| Need | Source |
+| --- | --- |
+| Service runbook: deploy, auth, capacity, reload, backup, incidents | [`crates/pqr-service/README.md`](crates/pqr-service/README.md) |
+| Operations detail: [threat model](crates/pqr-service/README.md#threat-model), [backup and recovery](crates/pqr-service/README.md#backup-and-recovery), [observability](crates/pqr-service/README.md#observability), [incident response](crates/pqr-service/README.md#incident-response) | [`crates/pqr-service/README.md`](crates/pqr-service/README.md) |
+| Benchmark contract and gates | [`benchmarks/README.md`](benchmarks/README.md) |
+| Release artifact verification: checksums, signatures, attestations, SBOM | [`.github/workflows/README.md#verify-a-release-artifact`](.github/workflows/README.md#verify-a-release-artifact) |
+
+The service has no built-in TLS and certificates carry no signature. Terminate
+TLS at a proxy, prefer file or KMS seed custody over environment variables, and
+treat certificates as self-consistent claims rather than authenticated
+attestations.
+
 ## Development
 
 ```sh
