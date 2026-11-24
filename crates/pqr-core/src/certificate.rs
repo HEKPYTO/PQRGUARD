@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::math::{beta_for, misses_allowed, MathError};
 
-pub const SCHEMA: &str = "pqr.guard/v0.1";
+pub const SCHEMA: &str = "pqrguard/v0.1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Target {
