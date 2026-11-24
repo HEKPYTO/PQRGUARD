@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::fs;
 use std::io;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rand::Rng;
 use rand::SeedableRng;
@@ -719,15 +719,15 @@ impl PqrIndex {
     }
 
     pub fn save(&self, dir: &Path) -> Result<(), IndexError> {
-        let parent = dir
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
+        let parent = parent_of(dir);
         fs::create_dir_all(parent)?;
-        let staging = tempfile::Builder::new()
-            .prefix(".pqr-save-")
-            .tempdir_in(parent)?;
-        let staged = staging.path().to_path_buf();
+        let _lock = crate::fileio::DirLock::acquire(parent)?;
+        recover_siblings(parent, dir)?;
+        let staged = tempfile::Builder::new()
+            .prefix(STAGING_PREFIX)
+            .tempdir_in(parent)?
+            .keep();
+        let _staging = StagingDir(staged.clone());
         let manifest = Manifest {
             schema: crate::certificate::SCHEMA.to_string(),
             dim: self.dim,
@@ -756,18 +756,19 @@ impl PqrIndex {
         write_synced(&staged.join(ORDER), &u32_bytes(&self.order))?;
         write_synced(&staged.join(STARTS), &u32_bytes(&self.starts))?;
         sync_dir(&staged)?;
-        let staged = staging.keep();
-        replace_dir(&staged, dir)?;
+        replace_dir(&staged, dir, parent)?;
         sync_dir(parent)?;
         Ok(())
     }
 
     pub fn load(dir: &Path, seed: &[u8; 32]) -> Result<Self, IndexError> {
-        let manifest_path = dir.join(MANIFEST);
-        if fs::metadata(&manifest_path)?.len() > MAX_MANIFEST_BYTES as u64 {
-            return Err(IndexError::Limit("manifest too large".to_string()));
-        }
-        let manifest: Manifest = serde_json::from_slice(&fs::read(manifest_path)?)?;
+        let parent = parent_of(dir);
+        let _lock = crate::fileio::DirLock::acquire(parent)?;
+        recover_siblings(parent, dir)?;
+        let manifest: Manifest = serde_json::from_slice(&read_index_file_max(
+            &dir.join(MANIFEST),
+            MAX_MANIFEST_BYTES as u64,
+        )?)?;
         if manifest.schema != crate::certificate::SCHEMA {
             return Err(IndexError::Corrupt("schema".to_string()));
         }
@@ -1069,14 +1070,69 @@ fn sync_dir(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn replace_dir(staged: &Path, dir: &Path) -> io::Result<()> {
+const BACKUP_PREFIX: &str = ".pqr-backup-";
+const STAGING_PREFIX: &str = ".pqr-save-";
+
+struct StagingDir(PathBuf);
+
+impl Drop for StagingDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn parent_of(dir: &Path) -> &Path {
+    dir.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn backup_path(parent: &Path, dir: &Path) -> PathBuf {
+    let name = dir.file_name().unwrap_or_default().to_string_lossy();
+    parent.join(format!("{BACKUP_PREFIX}{name}"))
+}
+
+fn recover_siblings(parent: &Path, dir: &Path) -> Result<(), IndexError> {
+    let backup = backup_path(parent, dir);
+    let backup_is_dir = fs::symlink_metadata(&backup).is_ok_and(|meta| meta.is_dir());
+    if backup_is_dir && fs::symlink_metadata(dir).is_err() {
+        fs::rename(&backup, dir)?;
+    }
+    for entry in fs::read_dir(parent)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let text = name.to_string_lossy();
+        let kind = entry.file_type()?;
+        if text.starts_with(STAGING_PREFIX) && kind.is_dir() {
+            fs::remove_dir_all(entry.path())?;
+            continue;
+        }
+        let Some(target) = text.strip_prefix(BACKUP_PREFIX) else {
+            continue;
+        };
+        if !kind.is_dir() {
+            continue;
+        }
+        let target_path = parent.join(target);
+        if fs::symlink_metadata(&target_path).is_err() {
+            fs::rename(entry.path(), target_path)?;
+        } else {
+            fs::remove_dir_all(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn replace_dir(staged: &Path, dir: &Path, parent: &Path) -> io::Result<()> {
+    let backup = backup_path(parent, dir);
     if fs::symlink_metadata(dir).is_err() {
         return fs::rename(staged, dir);
     }
-    let backup = staged.with_extension("old");
+    if fs::symlink_metadata(&backup).is_ok() {
+        fs::remove_dir_all(&backup)?;
+    }
     fs::rename(dir, &backup)?;
     if let Err(error) = fs::rename(staged, dir) {
-        let _ = fs::remove_dir_all(staged);
         return match fs::rename(&backup, dir) {
             Ok(()) => Err(error),
             Err(restore) => Err(io::Error::new(
@@ -1085,8 +1141,31 @@ fn replace_dir(staged: &Path, dir: &Path) -> io::Result<()> {
             )),
         };
     }
-    let _ = fs::remove_dir_all(&backup);
-    Ok(())
+    fs::remove_dir_all(&backup)
+}
+
+fn read_index_file_max(path: &Path, max_bytes: u64) -> Result<Vec<u8>, IndexError> {
+    let file = crate::fileio::open_no_follow(path).map_err(|error| {
+        if crate::fileio::is_symlink_error(&error) {
+            IndexError::Corrupt(format!("{} is a symlink", path.display()))
+        } else {
+            IndexError::Io(error)
+        }
+    })?;
+    let len = file.metadata()?.len();
+    if len > max_bytes {
+        return Err(IndexError::Limit(format!(
+            "{} exceeds maximum file bytes",
+            path.display()
+        )));
+    }
+    crate::fileio::read_limited(&file, len).map_err(|error| {
+        if error.kind() == io::ErrorKind::InvalidData {
+            IndexError::Limit(format!("{} exceeds maximum file bytes", path.display()))
+        } else {
+            IndexError::Io(error)
+        }
+    })
 }
 
 fn checked_len(a: usize, b: usize) -> Result<usize, IndexError> {
@@ -1096,14 +1175,7 @@ fn checked_len(a: usize, b: usize) -> Result<usize, IndexError> {
 
 fn read_index_file(path: &Path, elements: usize, width: usize) -> Result<Vec<u8>, IndexError> {
     let expected = checked_len(elements, width)?;
-    let metadata = fs::metadata(path)?;
-    if metadata.len() > MAX_INDEX_FILE_BYTES.min(expected as u64) {
-        return Err(IndexError::Limit(format!(
-            "{} exceeds maximum file bytes",
-            path.display()
-        )));
-    }
-    fs::read(path).map_err(IndexError::from)
+    read_index_file_max(path, MAX_INDEX_FILE_BYTES.min(expected as u64))
 }
 
 fn f32_bytes(values: &[f32]) -> Vec<u8> {

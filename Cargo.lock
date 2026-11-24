@@ -1286,6 +1286,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "faer",
+ "libc",
  "rand",
  "rand_chacha",
  "rand_distr",

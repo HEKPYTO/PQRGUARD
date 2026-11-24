@@ -500,3 +500,98 @@ fn index_load_checks_file_bytes_before_read() {
         Err(IndexError::Limit(_))
     ));
 }
+
+#[cfg(unix)]
+#[test]
+fn load_recovers_backup_after_interrupted_swap() {
+    use std::fs;
+    let (index, _) = build(12);
+    let outer = tempfile::tempdir().unwrap();
+    let dir = outer.path().join("index");
+    index.save(&dir).unwrap();
+    let backup = outer.path().join(".pqr-backup-index");
+    fs::rename(&dir, &backup).unwrap();
+    fs::create_dir_all(outer.path().join(".pqr-save-stale")).unwrap();
+
+    let loaded = PqrIndex::load(&dir, &[7u8; 32]).unwrap();
+    assert_eq!(loaded.index_id(), index.index_id());
+    assert!(!backup.exists());
+    assert!(!outer.path().join(".pqr-save-stale").exists());
+    assert!(dir.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn save_recovers_backup_before_replacing_index() {
+    use std::fs;
+    let dim = 12;
+    let (first, vectors) = build(dim);
+    let (second, _) = PqrIndex::build(
+        &vectors,
+        dim,
+        &BuildConfig {
+            partitions: 30,
+            stages: vec![dim / 2, dim],
+            iterations: 8,
+        },
+        &[9u8; 32],
+    )
+    .unwrap();
+    let outer = tempfile::tempdir().unwrap();
+    let dir = outer.path().join("index");
+    first.save(&dir).unwrap();
+    let backup = outer.path().join(".pqr-backup-index");
+    fs::rename(&dir, &backup).unwrap();
+
+    second.save(&dir).unwrap();
+    let loaded = PqrIndex::load(&dir, &[9u8; 32]).unwrap();
+    assert_eq!(loaded.index_id(), second.index_id());
+    assert!(!backup.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_swap_removes_staging_directory() {
+    use std::fs;
+    let (index, _) = build(12);
+    let outer = tempfile::tempdir().unwrap();
+    let dir = outer.path().join("index");
+    index.save(&dir).unwrap();
+    fs::write(outer.path().join(".pqr-backup-index"), b"blocked").unwrap();
+
+    assert!(index.save(&dir).is_err());
+    assert_eq!(
+        PqrIndex::load(&dir, &[7u8; 32]).unwrap().index_id(),
+        index.index_id()
+    );
+    let leftovers = fs::read_dir(outer.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".pqr-save-")
+        })
+        .count();
+    assert_eq!(leftovers, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn index_load_rejects_symlinked_files() {
+    use std::fs;
+    let (index, _) = build(12);
+    let dir = tempfile::tempdir().unwrap();
+    index.save(dir.path()).unwrap();
+    let real = dir.path().join("codes.u64");
+    let source = dir.path().join("codes.copy");
+    fs::copy(&real, &source).unwrap();
+    fs::remove_file(&real).unwrap();
+    std::os::unix::fs::symlink(&source, &real).unwrap();
+
+    assert!(matches!(
+        PqrIndex::load(dir.path(), &[7u8; 32]),
+        Err(IndexError::Corrupt(_))
+    ));
+}
