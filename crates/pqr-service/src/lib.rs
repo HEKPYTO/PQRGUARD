@@ -4,7 +4,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, TryLockError};
 use std::time::{Duration, Instant};
 
 use axum::extract::{DefaultBodyLimit, Request, State};
@@ -16,6 +16,7 @@ use axum::Router;
 use clap::Parser;
 use pqr_core::certificate::{Certificate, Degraded, DegradedReason, Status, Target};
 use pqr_core::index::{IndexError, PqrIndex, QueryOptions, QueryOutcome, StageEps};
+use pqr_core::seed::{Seed, SeedError};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
@@ -31,6 +32,7 @@ const ROUTES: [&str; 6] = [
 ];
 const STATUS_CLASSES: [&str; 3] = ["2xx", "4xx", "5xx"];
 const ERROR_REASONS: [&str; 4] = ["auth", "timeout", "client", "server"];
+const MAX_CONCURRENCY_CAP: usize = 64;
 const BUCKET_LIMITS: [&str; 8] = ["0.001", "0.005", "0.01", "0.05", "0.1", "0.5", "1", "+Inf"];
 const BUCKET_MICROS: [u64; 7] = [1_000, 5_000, 10_000, 50_000, 100_000, 500_000, 1_000_000];
 const MAX_EPS_ENTRIES: usize = 1024;
@@ -49,8 +51,12 @@ pub enum Error {
     Config(String),
     #[error("io: {0}")]
     Io(#[from] io::Error),
+    #[error("seed: {0}")]
+    Seed(#[from] SeedError),
     #[error("index: {0}")]
     Index(#[from] IndexError),
+    #[error("reload already in progress")]
+    ReloadBusy,
     #[error("server: {0}")]
     Serve(String),
 }
@@ -84,6 +90,13 @@ pub struct Config {
 
 impl Config {
     pub fn validate(&self) -> Result<(), Error> {
+        if self
+            .api_token
+            .as_deref()
+            .is_some_and(|token| token.trim().is_empty())
+        {
+            return Err(Error::Config("api token must not be empty".to_string()));
+        }
         if self.api_token.is_none() && !self.bind.ip().is_loopback() {
             return Err(Error::Config(
                 "a bearer token is required for non-loopback binds".to_string(),
@@ -100,61 +113,26 @@ impl Config {
         Ok(())
     }
 
-    pub fn seed(&self) -> Result<[u8; 32], Error> {
+    pub fn seed(&self) -> Result<Seed, Error> {
         if let Some(path) = &self.seed_file {
-            return decode_seed(&fs_read(path)?, false);
+            return Ok(match Seed::from_file(path) {
+                Ok(seed) => seed,
+                Err(SeedError::Length | SeedError::TooLarge) => {
+                    let bytes = std::fs::read(path)?;
+                    Seed::parse(bytes.trim_ascii(), false)?
+                }
+                Err(error) => return Err(error.into()),
+            });
         }
         if let Some(name) = &self.seed_env {
-            let value = std::env::var(name)
-                .map_err(|_| Error::Config("seed environment variable is not set".to_string()))?;
-            return decode_seed(value.as_bytes(), true);
+            return Ok(Seed::from_env(name)?);
         }
         if let Some(command) = &self.seed_command {
-            let output = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(command)
-                .output()?;
-            if !output.status.success() {
-                return Err(Error::Config("seed command failed".to_string()));
-            }
-            return decode_seed(&output.stdout, true);
+            return Ok(Seed::from_command(command)?);
         }
         Err(Error::Config(
             "one of --seed-file, --seed-env, or --seed-command is required".to_string(),
         ))
-    }
-}
-
-fn fs_read(path: &std::path::Path) -> Result<Vec<u8>, Error> {
-    Ok(std::fs::read(path)?)
-}
-
-fn decode_seed(bytes: &[u8], trim: bool) -> Result<[u8; 32], Error> {
-    let bytes = if trim { bytes.trim_ascii() } else { bytes };
-    let mut seed = [0u8; 32];
-    if bytes.len() == seed.len() {
-        seed.copy_from_slice(bytes);
-        return Ok(seed);
-    }
-    if bytes.len() == seed.len() * 2 {
-        for (slot, pair) in seed.iter_mut().zip(bytes.chunks_exact(2)) {
-            *slot = (hex_digit(pair[0])? << 4) | hex_digit(pair[1])?;
-        }
-        return Ok(seed);
-    }
-    Err(Error::Config(
-        "seed must be 32 raw bytes or 64 hex characters".to_string(),
-    ))
-}
-
-fn hex_digit(byte: u8) -> Result<u8, Error> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err(Error::Config(
-            "seed contains a non-hex character".to_string(),
-        )),
     }
 }
 
@@ -258,14 +236,15 @@ impl Metrics {
 pub struct AppState {
     index: RwLock<Arc<PqrIndex>>,
     ready: AtomicBool,
-    seed: [u8; 32],
+    seed: Seed,
     config: Config,
     metrics: Arc<Metrics>,
     eps_cache: Mutex<HashMap<EpsKey, StageEps>>,
+    reload_lock: Mutex<()>,
 }
 
 impl AppState {
-    pub fn new(index: PqrIndex, config: Config, seed: [u8; 32]) -> Self {
+    pub fn new(index: PqrIndex, config: Config, seed: Seed) -> Self {
         Self {
             index: RwLock::new(Arc::new(index)),
             ready: AtomicBool::new(true),
@@ -273,12 +252,13 @@ impl AppState {
             config,
             eps_cache: Mutex::new(HashMap::new()),
             metrics: Arc::new(Metrics::default()),
+            reload_lock: Mutex::new(()),
         }
     }
 
-    pub fn load(config: &Config, seed: [u8; 32]) -> Result<Arc<Self>, Error> {
+    pub fn load(config: &Config, seed: Seed) -> Result<Arc<Self>, Error> {
         config.validate()?;
-        let index = PqrIndex::load(&config.index, &seed)?;
+        let index = PqrIndex::load(&config.index, seed.as_bytes())?;
         Ok(Arc::new(Self::new(index, config.clone(), seed)))
     }
 
@@ -287,10 +267,20 @@ impl AppState {
     }
 
     pub fn reload_index(&self) -> Result<(), Error> {
+        let guard = match self.reload_lock.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return Err(Error::ReloadBusy),
+        };
         self.ready.store(false, Ordering::Release);
-        let index = PqrIndex::load(&self.config.index, &self.seed)?;
-        *self.index.write().expect("index lock poisoned") = Arc::new(index);
+        let index = PqrIndex::load(&self.config.index, self.seed.as_bytes())?;
+        let mut current = self
+            .index
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *current = Arc::new(index);
         self.ready.store(true, Ordering::Release);
+        drop(guard);
         Ok(())
     }
 
@@ -301,11 +291,19 @@ impl AppState {
             tau: target.tau().to_bits(),
             delta: target.delta().to_bits(),
         };
-        if let Some(token) = self.eps_cache.lock().expect("eps lock poisoned").get(&key) {
+        if let Some(token) = self
+            .eps_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&key)
+        {
             return Ok(token.clone());
         }
         let token = index.stage_eps(target)?;
-        let mut cache = self.eps_cache.lock().expect("eps lock poisoned");
+        let mut cache = self
+            .eps_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if cache.len() >= MAX_EPS_ENTRIES {
             cache.clear();
         }
@@ -315,7 +313,12 @@ impl AppState {
 
     fn live_index(&self) -> Option<Arc<PqrIndex>> {
         if self.is_ready() {
-            Some(self.index.read().expect("index lock poisoned").clone())
+            Some(
+                self.index
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone(),
+            )
         } else {
             None
         }
@@ -389,7 +392,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             state.clone(),
             observe_middleware,
         ))
-        .layer(ConcurrencyLimitLayer::new(state.config.max_concurrency))
+        .layer(ConcurrencyLimitLayer::new(
+            state.config.max_concurrency.min(MAX_CONCURRENCY_CAP),
+        ))
         .layer(DefaultBodyLimit::max(state.config.max_body_bytes))
         .with_state(state)
 }
@@ -420,12 +425,13 @@ async fn auth_middleware(State(state): State<Arc<AppState>>, req: Request, next:
     let Some(expected) = state.config.api_token.as_deref() else {
         return next.run(req).await;
     };
-    let authorized = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|provided| token_matches(expected.as_bytes(), provided.as_bytes()));
+    let authorized = !expected.trim().is_empty()
+        && req
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .is_some_and(|provided| token_matches(expected.as_bytes(), provided.as_bytes()));
     if !authorized {
         return ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
@@ -510,6 +516,9 @@ async fn query_handler(
                 | IndexError::Nprobe
                 | IndexError::Stages
                 | IndexError::Math(_) => invalid(),
+                IndexError::StageEps => {
+                    ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "query failed")
+                }
                 _ => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "query failed"),
             })
         }
@@ -547,6 +556,9 @@ async fn reload_handler(State(state): State<Arc<AppState>>) -> Response {
     let result = tokio::task::spawn_blocking(move || state.reload_index()).await;
     match result {
         Ok(Ok(())) => Json(json!({ "status": "ok" })).into_response(),
+        Ok(Err(Error::ReloadBusy)) => {
+            ApiError::new(StatusCode::CONFLICT, "reload already in progress").into_response()
+        }
         Ok(Err(error)) => {
             tracing::warn!(error = %error, "index reload rejected");
             ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "index reload failed").into_response()
@@ -554,5 +566,195 @@ async fn reload_handler(State(state): State<Arc<AppState>>) -> Response {
         Err(_) => {
             ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "index reload failed").into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::{to_bytes, Body};
+    use axum::http::Request;
+    use pqr_core::index::BuildConfig;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use tower::ServiceExt;
+
+    fn test_state(query_timeout_ms: u64) -> (tempfile::TempDir, Arc<AppState>) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let seed = Seed::from_bytes([11u8; 32]);
+        let data: Vec<f32> = (0..64)
+            .flat_map(|row| (0..4).map(move |column| (row * 4 + column) as f32 * 0.125))
+            .collect();
+        let (index, _) = PqrIndex::build(
+            &data,
+            4,
+            &BuildConfig {
+                partitions: 4,
+                stages: vec![2, 4],
+                iterations: 2,
+            },
+            seed.as_bytes(),
+        )
+        .expect("index");
+        index.save(dir.path()).expect("save index");
+        let config = Config {
+            index: dir.path().to_path_buf(),
+            seed_file: None,
+            seed_env: Some("PQR_TEST_SEED".to_string()),
+            seed_command: None,
+            bind: "127.0.0.1:0".parse().expect("bind"),
+            api_token: None,
+            max_body_bytes: 65_536,
+            query_timeout_ms,
+            max_k: 8,
+            max_nprobe: 4,
+            max_concurrency: 64,
+        };
+        (dir, Arc::new(AppState::new(index, config, seed)))
+    }
+
+    #[test]
+    fn poisoned_locks_are_recovered() {
+        let (_dir, state) = test_state(5_000);
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = state.index.write().expect("index lock");
+            panic!("poison index");
+        }));
+        assert!(state.live_index().is_some());
+        assert!(state.reload_index().is_ok());
+        assert!(state.is_ready());
+
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = state.eps_cache.lock().expect("eps lock");
+            panic!("poison eps");
+        }));
+        let target = Target::new(3, 1.0, 0.1).expect("target");
+        let index = state.live_index().expect("index");
+        assert!(state.stage_eps(&index, &target).is_ok());
+
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = state.reload_lock.lock().expect("reload lock");
+            panic!("poison reload");
+        }));
+        assert!(state.reload_index().is_ok());
+        assert!(state.is_ready());
+    }
+
+    #[test]
+    fn overlapping_reload_returns_busy() {
+        let (_dir, state) = test_state(5_000);
+        let guard = state.reload_lock.lock().expect("reload lock");
+        assert!(matches!(state.reload_index(), Err(Error::ReloadBusy)));
+        assert!(state.is_ready());
+        drop(guard);
+        assert!(state.reload_index().is_ok());
+    }
+
+    #[tokio::test]
+    async fn mismatched_stage_eps_is_server_error() {
+        let (_dir, state) = test_state(5_000);
+        let target = Target::new(3, 1.0, 0.1).expect("target");
+        let data: Vec<f32> = (0..80).map(|value| value as f32 * 0.125).collect();
+        let (other, _) = PqrIndex::build(
+            &data,
+            4,
+            &BuildConfig {
+                partitions: 4,
+                stages: vec![2, 4],
+                iterations: 2,
+            },
+            &[11u8; 32],
+        )
+        .expect("other index");
+        let token = other.stage_eps(&target).expect("token");
+        let key = EpsKey {
+            index_id: state.index.read().expect("index").index_id().to_string(),
+            k: target.k(),
+            tau: target.tau().to_bits(),
+            delta: target.delta().to_bits(),
+        };
+        state.eps_cache.lock().expect("cache").insert(key, token);
+        let router = build_router(state);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/query")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "query": [0.25, 0.5, 0.75, 1.0],
+                    "k": 3,
+                    "tau": 1.0,
+                    "delta": 0.1,
+                    "nprobe": 2
+                })
+                .to_string(),
+            ))
+            .expect("request");
+        let response = router.clone().oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error body");
+        assert!(String::from_utf8(bytes.to_vec())
+            .expect("utf8")
+            .contains("query failed"));
+        let request = Request::builder()
+            .uri("/metrics")
+            .body(Body::empty())
+            .expect("request");
+        let response = router.oneshot(request).await.expect("metrics");
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("metrics body");
+        let metrics = String::from_utf8(bytes.to_vec()).expect("metrics utf8");
+        assert!(
+            metrics.contains("pqr_http_errors_total{reason=\"server\"} 1"),
+            "{metrics}"
+        );
+    }
+    #[tokio::test]
+    async fn blocked_worker_times_out_and_counts_timeout() {
+        let (_dir, state) = test_state(1);
+        let router = build_router(state.clone());
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = state.clone();
+        let blocker = std::thread::spawn(move || {
+            let _guard = worker.eps_cache.lock().expect("cache");
+            locked_tx.send(()).expect("lock signal");
+            release_rx.recv().expect("release signal");
+        });
+        locked_rx.recv().expect("cache locked");
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/query")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "query": [0.25, 0.5, 0.75, 1.0],
+                    "k": 3,
+                    "tau": 1.0,
+                    "delta": 0.1,
+                    "nprobe": 2
+                })
+                .to_string(),
+            ))
+            .expect("request");
+        let response = router.clone().oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        release_tx.send(()).expect("release");
+        blocker.join().expect("blocker");
+        let request = Request::builder()
+            .uri("/metrics")
+            .body(Body::empty())
+            .expect("request");
+        let response = router.oneshot(request).await.expect("metrics");
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("metrics body");
+        let metrics = String::from_utf8(bytes.to_vec()).expect("metrics utf8");
+        assert!(
+            metrics.contains("pqr_http_errors_total{reason=\"timeout\"} 1"),
+            "{metrics}"
+        );
     }
 }

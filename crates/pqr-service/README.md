@@ -17,7 +17,7 @@ Every flag has an equivalent environment variable. Exactly one seed source must 
 | Flag | Env | Default | Meaning |
 | --- | --- | --- | --- |
 | `--index` | `PQR_INDEX` | required | Directory written by `pqr-guard build --out`. |
-| `--seed-file` | `PQR_SEED_FILE` | none | 32 raw bytes or 64 hex characters. |
+| `--seed-file` | `PQR_SEED_FILE` | none | 32 raw bytes or 64 hex characters; trailing ASCII whitespace allowed, no symlink, no group/world read access. |
 | `--seed-env` | `PQR_SEED_ENV` | none | Name of a variable holding the seed; value is ASCII-trimmed. |
 | `--seed-command` | `PQR_SEED_COMMAND` | none | Shell command whose stdout is an ASCII-trimmed seed. |
 | `--bind` | `PQR_BIND` | `127.0.0.1:8080` | Listener address. Non-loopback binds require a token. |
@@ -26,9 +26,9 @@ Every flag has an equivalent environment variable. Exactly one seed source must 
 | `--query-timeout-ms` | `PQR_QUERY_TIMEOUT_MS` | `5000` | Wall-clock limit for a query; timeout gets 504. |
 | `--max-k` | `PQR_MAX_K` | `1024` | Upper bound on requested `k`. |
 | `--max-nprobe` | `PQR_MAX_NPROBE` | `64` | Upper bound on requested `nprobe`. |
-| `--max-concurrency` | `PQR_MAX_CONCURRENCY` | `64` | Concurrent in-flight requests. |
+| `--max-concurrency` | `PQR_MAX_CONCURRENCY` | `64` | Concurrent in-flight requests; values above 64 are capped. |
 
-Seed decoding matches `pqr-guard`: 32 raw bytes, or 64 hex characters for the env and command sources.
+Seeds are decoded by `pqr-core` and held in zeroizing memory. Raw 32-byte files are kept byte-exact; hex and command/env values are ASCII-trimmed.
 
 ## Endpoints
 
@@ -54,13 +54,13 @@ Stage epsilon bounds are derived once per `(index_id, target)` on the server, ca
 
 ## Auth and TLS boundary
 
-When `PQR_API_TOKEN` is set, `/v1/query`, `/admin/reload`, and `/metrics` require `Authorization: Bearer <token>`. Comparison is constant time for equal-length tokens; token length is not treated as secret. Health and readiness probes stay public for orchestrators.
+When `PQR_API_TOKEN` is set, `/v1/query`, `/admin/reload`, and `/metrics` require `Authorization: Bearer <token>`. Empty or whitespace-only tokens are rejected. Comparison is constant time for equal-length tokens; token length is not treated as secret. Health and readiness probes stay public for orchestrators.
 
 The service does not terminate TLS. A non-loopback bind without a token is refused. For remote access, terminate TLS at a reverse proxy and pass the bearer token through; do not send a token over plain HTTP on an untrusted network.
 
 ## Limits and observability
 
-Bodies are capped before parsing, query work runs on the blocking pool under a wall-clock timeout, and concurrency is capped by a tower layer. Logs are JSON with method, path, status, and elapsed time; bodies, seeds, tokens, and query vectors are never logged. Set `RUST_LOG` to change the tracing filter.
+Bodies are capped before parsing, query work runs on the blocking pool under a wall-clock timeout that includes blocking-pool queue time, and concurrency is capped at 64 requests to stay below the blocking pool. Logs are JSON with method, path, status, and elapsed time; bodies, seeds, tokens, and query vectors are never logged. Set `RUST_LOG` to change the tracing filter.
 
 Metrics:
 
@@ -70,7 +70,7 @@ Metrics:
 
 ## Backup and reload
 
-Back up the whole index directory as written by `pqr-guard build`; files are a consistent set identified by the manifest `index_id`. Write a replacement index into a staging directory, then swap it into `PQR_INDEX` and send `POST /admin/reload` or `SIGHUP`. Reload marks readiness false, loads and verifies the new index, then swaps the `Arc<PqrIndex>` and marks readiness true. Queries arriving while not ready get 503 and no certificate.
+Back up the whole index directory as written by `pqr-guard build`; files are a consistent set identified by the manifest `index_id`. Write a replacement index into a staging directory, then swap it into `PQR_INDEX` and send `POST /admin/reload` or `SIGHUP`. Reloads are serialized: a concurrent `POST /admin/reload` returns 409, and repeated `SIGHUP` signals are rate-limited to one reload per second. A reload marks readiness false, loads and verifies the new index, then swaps the `Arc<PqrIndex>` and marks readiness true. Queries arriving while not ready get 503 and no certificate.
 
 ## Failure modes
 

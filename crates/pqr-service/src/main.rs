@@ -1,4 +1,5 @@
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::Parser;
 use pqr_service::{build_router, AppState, Config, Error};
@@ -48,11 +49,22 @@ fn spawn_reload_signal(state: std::sync::Arc<AppState>) {
         }
     };
     tokio::spawn(async move {
+        let mut last_reload = None;
         loop {
             hangup.recv().await;
+            let now = tokio::time::Instant::now();
+            if last_reload
+                .is_some_and(|previous| now.duration_since(previous) < Duration::from_secs(1))
+            {
+                continue;
+            }
+            last_reload = Some(now);
             let worker = state.clone();
             match tokio::task::spawn_blocking(move || worker.reload_index()).await {
                 Ok(Ok(())) => tracing::info!(event = "signal_reload", "index reloaded"),
+                Ok(Err(pqr_service::Error::ReloadBusy)) => {
+                    tracing::warn!(event = "signal_reload", "reload already in progress")
+                }
                 Ok(Err(error)) => {
                     tracing::warn!(event = "signal_reload", error = %error, "index reload failed")
                 }
