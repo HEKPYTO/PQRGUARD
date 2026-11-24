@@ -35,26 +35,30 @@ jobs:
       - name: Install cross
         if: matrix.cross
         run: cargo install cross --locked --version 0.2.5
-      - name: Build binary
+      - name: Build binaries
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --locked --release --target "${{ matrix.target }}" -p pqr-cli
+            cross build --locked --release --target "${{ matrix.target }}" -p pqr-cli -p pqr-service
           else
-            cargo build --locked --release --target "${{ matrix.target }}" -p pqr-cli
+            cargo build --locked --release --target "${{ matrix.target }}" -p pqr-cli -p pqr-service
           fi
           cp "target/${{ matrix.target }}/release/pqr-guard" "pqr-guard-${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/pqr-serve" "pqr-serve-${{ matrix.target }}"
       - name: Install cargo-cyclonedx
         run: cargo install cargo-cyclonedx --locked --version 0.5.10
-      - name: Generate CycloneDX SBOM
+      - name: Generate CycloneDX SBOMs
         run: |
-          cargo cyclonedx --format json --manifest-path crates/pqr-cli/Cargo.toml --target "${{ matrix.target }}" --override-filename sbom.cdx
-          mv crates/pqr-cli/sbom.cdx.json "sbom-${{ matrix.target }}.cdx.json"
+          cargo cyclonedx --format json --describe binaries --target "${{ matrix.target }}"
+          mv crates/pqr-cli/pqr-guard_bin.cdx.json "sbom-pqr-guard-${{ matrix.target }}.cdx.json"
+          mv crates/pqr-service/pqr-serve_bin.cdx.json "sbom-pqr-serve-${{ matrix.target }}.cdx.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: pqr-guard-${{ matrix.target }}
+          name: pqr-binaries-${{ matrix.target }}
           path: |
             pqr-guard-${{ matrix.target }}
-            sbom-${{ matrix.target }}.cdx.json
+            pqr-serve-${{ matrix.target }}
+            sbom-pqr-guard-${{ matrix.target }}.cdx.json
+            sbom-pqr-serve-${{ matrix.target }}.cdx.json
           if-no-files-found: error
 
   package:
@@ -71,25 +75,26 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: pqr-guard-*
+          pattern: pqr-binaries-*
           path: dist
           merge-multiple: true
       - name: Create checksums
         run: |
           cp Cargo.lock dist/
           cd dist
-          sha256sum pqr-guard-* sbom-*.cdx.json Cargo.lock > SHA256SUMS
+          sha256sum pqr-guard-* pqr-serve-* sbom-*.cdx.json Cargo.lock > SHA256SUMS
       - uses: actions/attest-build-provenance@db473fddc028af60658334401dc6fa3ffd8669fd # v2.3.0
         with:
           subject-path: |
             dist/pqr-guard-*
+            dist/pqr-serve-*
             dist/sbom-*.cdx.json
             dist/Cargo.lock
             dist/SHA256SUMS
       - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
       - name: Sign release artifacts
         run: |
-          for file in dist/pqr-guard-* dist/sbom-*.cdx.json dist/Cargo.lock dist/SHA256SUMS; do
+          for file in dist/pqr-guard-* dist/pqr-serve-* dist/sbom-*.cdx.json dist/Cargo.lock dist/SHA256SUMS; do
             cosign sign-blob --yes --bundle "$file.sigstore.json" "$file"
           done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
