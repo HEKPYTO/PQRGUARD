@@ -210,7 +210,7 @@ impl Certificate {
         if self.claim.theorem != theorem {
             return Err(CertificateError::ClaimTheorem);
         }
-        if self.claim.beta != target.beta() {
+        if !claim_close(self.claim.beta, target.beta()) {
             return Err(CertificateError::ClaimBeta);
         }
         if self.claim.m_allowed != target.m_allowed() {
@@ -219,7 +219,7 @@ impl Certificate {
         if self.claim.probability_space != "secret_random_rotation_P" {
             return Err(CertificateError::ClaimProbabilitySpace);
         }
-        if self.claim.expected_recall != target.expected_recall() {
+        if !claim_close(self.claim.expected_recall, target.expected_recall()) {
             return Err(CertificateError::ClaimExpectedRecall);
         }
         let expected = [
@@ -238,6 +238,13 @@ impl Certificate {
         }
         Ok(())
     }
+}
+
+const CLAIM_TOLERANCE: f64 = 1e-12;
+
+fn claim_close(actual: f64, expected: f64) -> bool {
+    let scale = expected.abs().max(1.0);
+    (actual - expected).abs() <= CLAIM_TOLERANCE * scale
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

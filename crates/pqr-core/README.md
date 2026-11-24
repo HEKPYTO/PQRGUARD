@@ -46,6 +46,9 @@ fp64 distance, and the radius shrinks to the k-th exact candidate distance.
 - The index stores a BLAKE3 seed commitment, never the seed.
 - Verification checks the claim against the target fields; it is not a signature
   and does not authenticate the producer or the assumptions.
+- Claim `beta` and `expected_recall` use abs/rel tolerance `1e-12`:
+  `|actual - expected| <= 1e-12 * max(1, |expected|)`. Larger differences are
+  rejected.
 - L2 only; no inner-product path.
 
 ## Resource and mutation contract

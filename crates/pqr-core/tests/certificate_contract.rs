@@ -116,3 +116,28 @@ fn verify_rejects_invalid_structure_and_degraded_status() {
     value["recall"] = serde_json::json!(0.99);
     assert!(serde_json::from_value::<Certificate>(value).is_err());
 }
+
+#[test]
+fn verify_accepts_one_ulp_claim_rounding() {
+    let target = Target::new(10, 0.9, 0.01).unwrap();
+    let cert = Certificate::certified("blake3:abc", 64, &target, &[16, 32, 64]);
+    let mut rounded = cert.clone();
+    rounded.claim.beta = f64::from_bits(cert.claim.beta.to_bits() + 1);
+    rounded.claim.expected_recall = f64::from_bits(cert.claim.expected_recall.to_bits() + 1);
+    rounded.verify().unwrap();
+}
+
+#[test]
+fn verify_rejects_material_claim_delta() {
+    let target = Target::new(10, 0.9, 0.01).unwrap();
+    let cert = Certificate::certified("blake3:abc", 64, &target, &[16, 32, 64]);
+    let mut forged = cert.clone();
+    forged.claim.beta += 1e-6;
+    assert_eq!(forged.verify().unwrap_err(), CertificateError::ClaimBeta);
+    forged = cert.clone();
+    forged.claim.expected_recall += 1e-6;
+    assert_eq!(
+        forged.verify().unwrap_err(),
+        CertificateError::ClaimExpectedRecall
+    );
+}

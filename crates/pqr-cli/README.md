@@ -38,6 +38,8 @@ certificate objects and `query` output lines are accepted; degraded records
 are not. Prints a JSON summary with line, valid, invalid counts and errors.
 Exit `2` if any line is invalid. This checks self-consistency only: it does not
 authenticate the producer, attest to the assumptions, or verify a signature.
+Numeric claims allow abs/rel tolerance `1e-12` for platform rounding; larger
+differences are rejected.
 
 ### audit
 
