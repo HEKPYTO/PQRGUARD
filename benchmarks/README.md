@@ -60,8 +60,7 @@ checker. Its exit status is nonzero on any gate breach or input mismatch.
 | Baseline | `--baseline usearch-hnsw --hnsw-cache fixtures/sift1m.usearch` |
 | Gate checker | `--p50-max 4 --p95-max 5 --recall-min 0.99 --ef-search 128` |
 
-The seed is the 64-character hex encoding of
-`sha256("pqrguard benchmark seed v1")`:
+The seed is the fixed 32-byte public benchmark constant below:
 
 ```text
 f6d4447d718efc8069ebd632aad19f61783489666e160d135f0a81154efea736
