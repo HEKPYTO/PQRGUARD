@@ -32,7 +32,7 @@ fn brute(vectors: &[f32], dim: usize, q: &[f32], k: usize) -> Vec<u64> {
             (s, id as u64)
         })
         .collect();
-    all.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    all.sort_unstable_by(pqr_core::index::distance_then_id);
     all.into_iter().take(k).map(|(_, id)| id).collect()
 }
 
@@ -194,6 +194,7 @@ fn stage_eps_token_is_bound_to_its_index_and_target() {
 #[test]
 fn audit_is_falsification_only_and_reports_trials() {
     use pqr_core::audit::{audit, AuditConfig};
+    use pqr_core::seed::Seed;
     let dim = 12;
     let (mut index, vectors) = build(dim);
     let queries: Vec<f32> = vectors[..dim * 20].to_vec();
@@ -201,7 +202,7 @@ fn audit_is_falsification_only_and_reports_trials() {
     let cfg = AuditConfig {
         rotations: 100,
         nprobe: 2,
-        master_seed: [9u8; 32],
+        master_seed: Seed::from_bytes([9u8; 32]),
     };
     let original_id = index.index_id().to_string();
     let report = audit(&mut index, &queries, target, &cfg, None).unwrap();
@@ -360,4 +361,39 @@ fn large_index_queries_cover_exhaustive_and_parallel_paths() {
     };
     let got: Vec<u64> = hits.iter().map(|h| h.id).collect();
     assert_eq!(got, brute(&vectors, dim, q, 1));
+}
+
+#[test]
+fn duplicate_distances_use_lowest_ids() {
+    let dim = 4;
+    let vectors = vec![0.0f32; 4 * 8];
+    let (index, _) = PqrIndex::build(
+        &vectors,
+        dim,
+        &BuildConfig {
+            partitions: 2,
+            stages: vec![2, 4],
+            iterations: 2,
+        },
+        &[7u8; 32],
+    )
+    .unwrap();
+    let target = Target::new(4, 1.0, 0.01).unwrap();
+    let outcome = index
+        .query(
+            &[0.0; 4],
+            &QueryOptions {
+                target,
+                nprobe: 2,
+                reasons: Vec::new(),
+                stage_eps: None,
+            },
+        )
+        .unwrap();
+    let QueryOutcome::Certified { hits, .. } = outcome else {
+        panic!("expected certified");
+    };
+    let ids: Vec<u64> = hits.iter().map(|h| h.id).collect();
+    assert_eq!(ids, vec![0, 1, 2, 3]);
+    assert_eq!(brute(&vectors, dim, &[0.0; 4], 4), vec![0, 1, 2, 3]);
 }

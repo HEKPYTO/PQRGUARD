@@ -1,4 +1,6 @@
-use pqr_core::certificate::{Certificate, Degraded, DegradedReason, Status, Target, TargetError};
+use pqr_core::certificate::{
+    Certificate, CertificateError, Degraded, DegradedReason, Status, Target, TargetError,
+};
 use pqr_core::math::MathError;
 
 #[test]
@@ -41,4 +43,76 @@ fn degraded_never_upgrades() {
     assert_eq!(value["status"], "degraded");
     assert!(value.get("claim").is_none());
     assert_eq!(degraded.status, Status::Degraded);
+}
+
+#[test]
+fn verify_recomputes_claim_from_target() {
+    let target = Target::new(10, 0.9, 0.01).unwrap();
+    let cert = Certificate::certified("blake3:abc", 64, &target, &[16, 32, 64]);
+    cert.verify().unwrap();
+    let json = serde_json::to_string(&cert).unwrap();
+    let parsed: Certificate = serde_json::from_str(&json).unwrap();
+    parsed.verify().unwrap();
+
+    let mut bad = parsed.clone();
+    bad.claim.beta += 0.1;
+    assert_eq!(bad.verify().unwrap_err(), CertificateError::ClaimBeta);
+    bad = parsed.clone();
+    bad.claim.m_allowed += 1;
+    assert_eq!(bad.verify().unwrap_err(), CertificateError::ClaimMAllowed);
+    bad = parsed.clone();
+    bad.claim.expected_recall = 0.5;
+    assert_eq!(
+        bad.verify().unwrap_err(),
+        CertificateError::ClaimExpectedRecall
+    );
+    bad = parsed.clone();
+    bad.claim.theorem = "Thm2".to_string();
+    assert_eq!(bad.verify().unwrap_err(), CertificateError::ClaimTheorem);
+    bad = parsed.clone();
+    bad.claim.kind = "recall".to_string();
+    assert_eq!(bad.verify().unwrap_err(), CertificateError::ClaimKind);
+    bad = parsed.clone();
+    bad.claim.probability_space = "fixed_P".to_string();
+    assert_eq!(
+        bad.verify().unwrap_err(),
+        CertificateError::ClaimProbabilitySpace
+    );
+}
+
+#[test]
+fn verify_rejects_invalid_structure_and_degraded_status() {
+    let target = Target::new(10, 0.9, 0.01).unwrap();
+    let cert = Certificate::certified("blake3:abc", 64, &target, &[16, 32, 64]);
+    let mut bad = cert.clone();
+    bad.status = Status::Degraded;
+    assert_eq!(bad.verify().unwrap_err(), CertificateError::Status);
+    bad = cert.clone();
+    bad.schema = "pqr.guard/v0.2".to_string();
+    assert_eq!(bad.verify().unwrap_err(), CertificateError::Schema);
+    bad = cert.clone();
+    bad.dim = 2;
+    assert_eq!(bad.verify().unwrap_err(), CertificateError::Dimension);
+    bad = cert.clone();
+    bad.k = 0;
+    assert_eq!(
+        bad.verify().unwrap_err(),
+        CertificateError::Target(TargetError::K)
+    );
+    bad = cert.clone();
+    bad.stages.clear();
+    assert_eq!(bad.verify().unwrap_err(), CertificateError::Stages);
+    bad = cert.clone();
+    bad.stages.push(bad.stages[0].clone());
+    assert_eq!(bad.verify().unwrap_err(), CertificateError::Stages);
+    bad = cert.clone();
+    bad.assumptions.pop();
+    assert_eq!(bad.verify().unwrap_err(), CertificateError::Assumptions);
+    bad = cert.clone();
+    bad.claim.beta = f64::NAN;
+    assert_eq!(bad.verify().unwrap_err(), CertificateError::NonFinite);
+
+    let mut value = serde_json::to_value(&cert).unwrap();
+    value["recall"] = serde_json::json!(0.99);
+    assert!(serde_json::from_value::<Certificate>(value).is_err());
 }

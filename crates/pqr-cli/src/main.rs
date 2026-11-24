@@ -1,12 +1,13 @@
 use std::fs;
-use std::io::{BufWriter, Write};
+use std::io::{BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use pqr_core::audit::{audit, AuditConfig};
-use pqr_core::certificate::{DegradedReason, Target};
-use pqr_core::index::{BuildConfig, PqrIndex, QueryOptions, QueryOutcome};
+use pqr_core::certificate::{Certificate, DegradedReason, Target};
+use pqr_core::index::{distance_then_id, BuildConfig, PqrIndex, QueryOptions, QueryOutcome};
+use pqr_core::seed::Seed;
 
 type CliResult<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -34,6 +35,13 @@ enum Command {
     Query(QueryArgs),
     Audit(AuditArgs),
     Bench(BenchArgs),
+    Verify(VerifyArgs),
+}
+
+#[derive(clap::Args)]
+struct VerifyArgs {
+    #[arg(long)]
+    certificates: PathBuf,
 }
 
 #[derive(clap::Args)]
@@ -154,6 +162,7 @@ fn run() -> CliResult<i32> {
         Command::Query(args) => query(args),
         Command::Audit(args) => run_audit(args),
         Command::Bench(args) => bench(args),
+        Command::Verify(args) => verify(args),
     }
 }
 
@@ -183,7 +192,8 @@ fn build(args: BuildArgs) -> CliResult<i32> {
         stages,
         iterations: args.iterations,
     };
-    let (index, receipt) = PqrIndex::build(&vectors, dim, &cfg, &seed)?;
+    let (index, receipt) = PqrIndex::build(&vectors, dim, &cfg, seed.as_bytes())?;
+    drop(seed);
     index.save(&args.out)?;
     println!("{}", serde_json::to_string_pretty(&receipt)?);
     Ok(0)
@@ -191,7 +201,8 @@ fn build(args: BuildArgs) -> CliResult<i32> {
 
 fn query(args: QueryArgs) -> CliResult<i32> {
     let seed = args.seed.read()?;
-    let index = PqrIndex::load(&args.index, &seed)?;
+    let index = PqrIndex::load(&args.index, seed.as_bytes())?;
+    drop(seed);
     let (queries, shape) = read_npy_f32(&args.queries)?;
     let dim = index.dim();
     let nq = validate_queries(&queries, &shape, dim)?;
@@ -245,15 +256,23 @@ fn query(args: QueryArgs) -> CliResult<i32> {
 
 fn run_audit(args: AuditArgs) -> CliResult<i32> {
     let seed = args.seed.read()?;
-    let mut index = PqrIndex::load(&args.index, &seed)?;
+    let master_seed = match &args.audit_seed_file {
+        Some(path) => Seed::from_file(path)?,
+        None => {
+            let mut h = blake3::Hasher::new();
+            h.update(b"pqr.guard.audit.master");
+            h.update(seed.as_bytes());
+            Seed::from_bytes(*h.finalize().as_bytes())
+        }
+    };
+    if args.rotations == 0 {
+        return Err(config_error("--rotations must be positive"));
+    }
+    let mut index = PqrIndex::load(&args.index, seed.as_bytes())?;
+    drop(seed);
     let (queries, shape) = read_npy_f32(&args.queries)?;
     validate_queries(&queries, &shape, index.dim())?;
     let target = Target::new(args.k, args.tau, args.delta)?;
-    let master_seed = match &args.audit_seed_file {
-        Some(path) => read_seed_path(path)?,
-        None => *blake3::hash(&[b"pqr.guard.audit.master".as_slice(), seed.as_slice()].concat())
-            .as_bytes(),
-    };
     let gt = match &args.gt {
         Some(path) => Some(read_npy_i64(path)?),
         None => None,
@@ -267,6 +286,56 @@ fn run_audit(args: AuditArgs) -> CliResult<i32> {
     fs::write(&args.report, serde_json::to_vec_pretty(&report)?)?;
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(if report.verdict == "pass" { 0 } else { 3 })
+}
+
+#[derive(serde::Serialize)]
+struct VerifySummary {
+    lines: usize,
+    valid: usize,
+    invalid: usize,
+    errors: Vec<String>,
+}
+
+fn verify(args: VerifyArgs) -> CliResult<i32> {
+    let file = fs::File::open(&args.certificates)?;
+    let mut summary = VerifySummary {
+        lines: 0,
+        valid: 0,
+        invalid: 0,
+        errors: Vec::new(),
+    };
+    for line in std::io::BufReader::new(file).lines() {
+        let line = line?;
+        summary.lines += 1;
+        match verify_line(&line) {
+            Ok(()) => summary.valid += 1,
+            Err(error) => {
+                summary.invalid += 1;
+                if summary.errors.len() < 20 {
+                    summary
+                        .errors
+                        .push(format!("line {}: {error}", summary.lines));
+                }
+            }
+        }
+    }
+    let code = if summary.invalid > 0 { 2 } else { 0 };
+    println!("{}", serde_json::to_string(&summary)?);
+    Ok(code)
+}
+
+fn verify_line(line: &str) -> CliResult<()> {
+    let value: serde_json::Value = serde_json::from_str(line)?;
+    let certificate = match value.get("status").and_then(|s| s.as_str()) {
+        Some("degraded") => return Err(config_error("degraded record cannot verify as certified")),
+        Some("certified") => value
+            .get("certificate")
+            .ok_or_else(|| config_error("certified record has no certificate"))?,
+        _ => &value,
+    };
+    let certificate: Certificate = serde_json::from_value(certificate.clone())?;
+    certificate.verify()?;
+    Ok(())
 }
 
 #[derive(serde::Serialize)]
@@ -293,7 +362,8 @@ fn bench(args: BenchArgs) -> CliResult<i32> {
         ));
     }
     let seed = args.seed.read()?;
-    let index = PqrIndex::load(&args.index, &seed)?;
+    let index = PqrIndex::load(&args.index, seed.as_bytes())?;
+    drop(seed);
     let (queries, shape) = read_npy_f32(&args.queries)?;
     let dim = index.dim();
     let nq = validate_queries(&queries, &shape, dim)?;
@@ -453,7 +523,7 @@ fn brute_top(index: &PqrIndex, q: &[f32], k: usize) -> Vec<u64> {
             (s, id as u64)
         })
         .collect();
-    all.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    all.sort_unstable_by(distance_then_id);
     all.into_iter().take(k).map(|(_, id)| id).collect()
 }
 
@@ -477,62 +547,19 @@ struct SeedArgs {
 }
 
 impl SeedArgs {
-    fn read(&self) -> CliResult<[u8; 32]> {
+    fn read(&self) -> CliResult<Seed> {
         if let Some(path) = &self.seed_file {
-            return read_seed_path(path);
+            return Ok(Seed::from_file(path)?);
         }
         if let Some(name) = &self.seed_env {
-            let value = std::env::var(name)
-                .map_err(|_| config_error("seed environment variable is not set"))?;
-            return decode_seed(value.as_bytes(), true);
+            return Ok(Seed::from_env(name)?);
         }
         if let Some(command) = &self.seed_command {
-            let output = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(command)
-                .output()
-                .map_err(|_| config_error("seed command failed to start"))?;
-            if !output.status.success() {
-                return Err(config_error("seed command failed"));
-            }
-            return decode_seed(&output.stdout, true);
+            return Ok(Seed::from_command(command)?);
         }
         Err(config_error(
             "one of --seed-file, --seed-env, or --seed-command is required",
         ))
-    }
-}
-
-fn read_seed_path(path: &Path) -> CliResult<[u8; 32]> {
-    decode_seed(&fs::read(path)?, false)
-}
-
-fn decode_seed(bytes: &[u8], trim: bool) -> CliResult<[u8; 32]> {
-    let bytes = if trim { bytes.trim_ascii() } else { bytes };
-    let mut seed = [0u8; 32];
-    if bytes.len() == 32 {
-        seed.copy_from_slice(bytes);
-        return Ok(seed);
-    }
-    if bytes.len() == 64 {
-        for (i, slot) in seed.iter_mut().enumerate() {
-            let hi = hex_digit(bytes[i * 2])?;
-            let lo = hex_digit(bytes[i * 2 + 1])?;
-            *slot = (hi << 4) | lo;
-        }
-        return Ok(seed);
-    }
-    Err(config_error(
-        "seed must be 32 raw bytes or 64 hex characters",
-    ))
-}
-
-fn hex_digit(byte: u8) -> CliResult<u8> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err(config_error("seed hex contains a non-hex character")),
     }
 }
 
@@ -561,9 +588,25 @@ fn parse_stages(spec: &str, dim: usize) -> CliResult<Vec<usize>> {
     Ok(stages)
 }
 
+fn checked_npy(bytes: &[u8], item_size: u64) -> CliResult<npyz::NpyFile<std::io::Cursor<&[u8]>>> {
+    let probe = npyz::NpyFile::new(std::io::Cursor::new(bytes))?;
+    let header = probe.header().clone();
+    let cursor = probe.into_inner();
+    let offset = cursor.position() as usize;
+    let claimed = header
+        .len()
+        .checked_mul(item_size)
+        .ok_or_else(|| config_error("npy shape exceeds file size"))?;
+    let available = bytes.len().saturating_sub(offset) as u64;
+    if claimed > available {
+        return Err(config_error("npy shape exceeds file size"));
+    }
+    Ok(npyz::NpyFile::with_header(header, cursor))
+}
+
 fn read_npy_f32(path: &Path) -> CliResult<(Vec<f32>, Vec<usize>)> {
     let bytes = fs::read(path)?;
-    let npy = npyz::NpyFile::new(std::io::Cursor::new(bytes))?;
+    let npy = checked_npy(&bytes, 4)?;
     let shape: Vec<usize> = npy.shape().iter().map(|v| *v as usize).collect();
     let data = npy.into_vec::<f32>()?;
     Ok((data, shape))
@@ -571,9 +614,13 @@ fn read_npy_f32(path: &Path) -> CliResult<(Vec<f32>, Vec<usize>)> {
 
 fn read_npy_i64(path: &Path) -> CliResult<Vec<u64>> {
     let bytes = fs::read(path)?;
-    let npy = npyz::NpyFile::new(std::io::Cursor::new(bytes))?;
+    let npy = checked_npy(&bytes, 8)?;
     let data = npy.into_vec::<i64>()?;
-    Ok(data.into_iter().map(|v| v as u64).collect())
+    data.into_iter().map(gt_id).collect()
+}
+
+fn gt_id(value: i64) -> CliResult<u64> {
+    u64::try_from(value).map_err(|_| config_error("ground truth ids must be nonnegative"))
 }
 
 #[cfg(test)]
@@ -583,11 +630,59 @@ mod tests {
     #[test]
     fn seed_decoder_accepts_raw_and_hex() {
         let raw = [7u8; 32];
-        assert_eq!(decode_seed(&raw, false).unwrap(), raw);
+        assert_eq!(Seed::parse(&raw, false).unwrap().as_bytes(), &raw);
         let hex: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(decode_seed(hex.as_bytes(), true).unwrap(), raw);
-        assert!(decode_seed(b"short", true).is_err());
-        assert!(decode_seed(&[b'z'; 64], true).is_err());
+        assert_eq!(Seed::parse(hex.as_bytes(), true).unwrap().as_bytes(), &raw);
+        assert!(Seed::parse(b"short", true).is_err());
+        assert!(Seed::parse(&[b'z'; 64], true).is_err());
+    }
+
+    #[test]
+    fn verify_rejects_tampered_and_degraded_lines() {
+        let target = Target::new(10, 0.9, 0.01).unwrap();
+        let cert = Certificate::certified("blake3:abc", 64, &target, &[16, 32, 64]);
+        let valid = serde_json::to_string(&serde_json::json!({
+            "query": 0,
+            "status": "certified",
+            "certificate": cert.clone(),
+            "hits": []
+        }))
+        .unwrap();
+        let mut bad = cert.clone();
+        bad.claim.beta += 0.1;
+        let tampered = serde_json::to_string(&serde_json::json!({
+            "query": 1,
+            "status": "certified",
+            "certificate": bad,
+            "hits": []
+        }))
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("certs.jsonl");
+        fs::write(&path, format!("{valid}\n{tampered}\n")).unwrap();
+        assert_eq!(
+            verify(VerifyArgs {
+                certificates: path.clone()
+            })
+            .unwrap(),
+            2
+        );
+        fs::write(&path, format!("{valid}\n")).unwrap();
+        assert_eq!(verify(VerifyArgs { certificates: path }).unwrap(), 0);
+    }
+
+    #[test]
+    fn ground_truth_ids_must_be_nonnegative() {
+        assert_eq!(gt_id(7).unwrap(), 7);
+        assert!(gt_id(-1).is_err());
+    }
+
+    #[test]
+    fn npy_shape_must_fit_file() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/q.npy");
+        let bytes = fs::read(path).unwrap();
+        assert!(checked_npy(&bytes, 4).is_ok());
+        assert!(checked_npy(&bytes, 8).is_err());
     }
 
     #[test]

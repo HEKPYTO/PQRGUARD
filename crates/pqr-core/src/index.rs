@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -547,7 +548,7 @@ impl PqrIndex {
             phi2[p] = s;
         }
         let mut order: Vec<usize> = (0..self.partitions).collect();
-        order.sort_unstable_by(|a, b| phi2[*a].total_cmp(&phi2[*b]));
+        order.sort_unstable_by(|a, b| phi2[*a].total_cmp(&phi2[*b]).then_with(|| a.cmp(b)));
         let visited = opts.nprobe.min(self.partitions);
 
         let mut candidates: Vec<(f64, u32)> = Vec::with_capacity(k + 1);
@@ -963,12 +964,16 @@ fn exact_distance2(vectors: &[f32], id: usize, dim: usize, q: &[f64]) -> f64 {
     s
 }
 
+pub fn distance_then_id<I: Ord>(a: &(f64, I), b: &(f64, I)) -> Ordering {
+    a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1))
+}
+
 fn push_candidate(candidates: &mut Vec<(f64, u32)>, d: f64, id: u32, k: usize) {
     if candidates.iter().any(|(_, existing)| *existing == id) {
         return;
     }
     candidates.push((d, id));
-    candidates.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    candidates.sort_unstable_by(distance_then_id);
     if candidates.len() > k {
         candidates.pop();
     }
