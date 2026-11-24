@@ -254,6 +254,9 @@ impl PqrIndex {
             index_id: String::new(),
         };
         index.encode_all();
+        if index.norms.iter().any(|v| !v.is_finite()) {
+            return Err(IndexError::NonFinite);
+        }
         index.build_scan_layout();
         index.index_id = index.compute_id();
         let receipt = BuildReceipt {
@@ -407,7 +410,11 @@ impl PqrIndex {
             let begin = self.starts[p] as usize;
             let end = self.starts[p + 1] as usize;
             let mut slots: Vec<usize> = (begin..end).collect();
-            slots.sort_unstable_by(|&a, &b| norms[a].total_cmp(&norms[b]));
+            slots.sort_unstable_by(|&a, &b| {
+                norms[a]
+                    .total_cmp(&norms[b])
+                    .then_with(|| self.order[a].cmp(&self.order[b]))
+            });
             for (offset, &src) in slots.iter().enumerate() {
                 let dst = begin + offset;
                 sorted_norms[dst] = norms[src];
@@ -499,8 +506,8 @@ impl PqrIndex {
             let end = self.starts[p + 1] as usize;
             let (lo, hi) = if r2.is_finite() {
                 let sub = &self.scan_norms[begin..end];
-                let low = begin + sub.partition_point(|x| (*x as f64) < phi - r);
-                let high = begin + sub.partition_point(|x| (*x as f64) <= phi + r);
+                let low = begin + sub.partition_point(|x| (*x as f64) < next_down(phi - r));
+                let high = begin + sub.partition_point(|x| (*x as f64) <= next_up(phi + r));
                 (low, high)
             } else {
                 (begin, end)
@@ -661,6 +668,9 @@ impl PqrIndex {
         let centroids = read_f32(&fs::read(dir.join(CENTROIDS))?, manifest.partitions * dim)?;
         let assign = read_u32(&fs::read(dir.join(ASSIGN))?, n)?;
         let norms = read_f32(&fs::read(dir.join(NORMS))?, n)?;
+        if norms.iter().any(|v| !v.is_finite()) {
+            return Err(IndexError::NonFinite);
+        }
         let codes = read_u64(&fs::read(dir.join(CODES))?, n * words)?;
         let coeffs = read_f64(&fs::read(dir.join(COEFFS))?, n * manifest.stages.len() * 2)?;
         let mut coeff_a = Vec::with_capacity(n * manifest.stages.len());
@@ -851,6 +861,34 @@ fn distance2(vectors: &[f32], id: usize, centroids: &[f32], c: usize, dim: usize
     s
 }
 
+fn next_up(x: f64) -> f64 {
+    if x.is_nan() || x == f64::INFINITY {
+        return x;
+    }
+    if x == 0.0 {
+        return f64::from_bits(1);
+    }
+    if x > 0.0 {
+        f64::from_bits(x.to_bits() + 1)
+    } else {
+        f64::from_bits(x.to_bits() - 1)
+    }
+}
+
+fn next_down(x: f64) -> f64 {
+    if x.is_nan() || x == f64::NEG_INFINITY {
+        return x;
+    }
+    if x == 0.0 {
+        return f64::from_bits(0x8000_0000_0000_0001);
+    }
+    if x > 0.0 {
+        f64::from_bits(x.to_bits() - 1)
+    } else {
+        f64::from_bits(x.to_bits() + 1)
+    }
+}
+
 fn exact_distance2(vectors: &[f32], id: usize, dim: usize, q: &[f64]) -> f64 {
     let mut s = 0.0;
     for j in 0..dim {
@@ -951,6 +989,15 @@ fn read_u64(bytes: &[u8], expected: usize) -> Result<Vec<u64>, IndexError> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn next_up_down_step_one_ulp() {
+        assert!(next_up(1.0) > 1.0);
+        assert!(next_down(1.0) < 1.0);
+        assert!(next_up(-1.0) > -1.0);
+        assert!(next_down(-1.0) < -1.0);
+        assert_eq!(next_up(f64::INFINITY), f64::INFINITY);
+        assert_eq!(next_down(f64::NEG_INFINITY), f64::NEG_INFINITY);
+    }
     #[test]
     fn fast_stage_dot_matches_naive_channels() {
         let q: Vec<f64> = (0..128).map(|i| (i as f64 * 0.37).sin()).collect();
