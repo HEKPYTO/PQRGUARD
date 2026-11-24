@@ -4,8 +4,6 @@
 /.git
 /.worktrees
 /research
-/.trail
-/opencode.json
 /AGENTS.md
 /HANDOFF.md
 /.pre-commit-config.yaml
