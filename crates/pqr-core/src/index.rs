@@ -762,9 +762,6 @@ impl PqrIndex {
     }
 
     pub fn load(dir: &Path, seed: &[u8; 32]) -> Result<Self, IndexError> {
-        let parent = parent_of(dir);
-        let _lock = crate::fileio::DirLock::acquire(parent)?;
-        recover_siblings(parent, dir)?;
         let manifest: Manifest = serde_json::from_slice(&read_index_file_max(
             &dir.join(MANIFEST),
             MAX_MANIFEST_BYTES as u64,
@@ -815,9 +812,6 @@ impl PqrIndex {
         )?;
         let assign = read_u32(&read_index_file(&dir.join(ASSIGN), n, 4)?, n)?;
         let norms = read_f32(&read_index_file(&dir.join(NORMS), n, 4)?, n)?;
-        if norms.iter().any(|v| !v.is_finite()) {
-            return Err(IndexError::NonFinite);
-        }
         let codes = read_u64(&read_index_file(&dir.join(CODES), code_len, 8)?, code_len)?;
         let coeffs = read_f64(
             &read_index_file(&dir.join(COEFFS), coeffs_len, 8)?,
@@ -864,12 +858,49 @@ impl PqrIndex {
             seed_commitment: manifest.seed_commitment,
             index_id: manifest.index_id.clone(),
         };
+        index.validate_layout()?;
         if index.compute_id() != manifest.index_id {
             return Err(IndexError::Checksum);
         }
         index.build_scan_layout();
         index.index_id = manifest.index_id;
         Ok(index)
+    }
+
+    fn validate_layout(&self) -> Result<(), IndexError> {
+        if self.order.len() != self.n
+            || self.assign.len() != self.n
+            || self.starts.len() != self.partitions + 1
+        {
+            return Err(IndexError::Corrupt("layout length".to_string()));
+        }
+        let mut seen = vec![false; self.n];
+        for &id in &self.order {
+            let id = id as usize;
+            if id >= self.n || seen[id] {
+                return Err(IndexError::Corrupt("order".to_string()));
+            }
+            seen[id] = true;
+        }
+        if self.starts[0] != 0
+            || self.starts.windows(2).any(|pair| pair[1] < pair[0])
+            || self.starts[self.partitions] as usize != self.n
+        {
+            return Err(IndexError::Corrupt("starts".to_string()));
+        }
+        if self.assign.iter().any(|&p| p as usize >= self.partitions) {
+            return Err(IndexError::Corrupt("assign".to_string()));
+        }
+        if self.vectors.iter().any(|v| !v.is_finite())
+            || self.centroids.iter().any(|v| !v.is_finite())
+            || self.norms.iter().any(|v| !v.is_finite())
+            || self.coeff_a.iter().any(|v| !v.is_finite())
+            || self.coeff_k.iter().any(|v| !v.is_finite())
+            || self.coeff_c.iter().any(|v| !v.is_finite())
+        {
+            return Err(IndexError::NonFinite);
+        }
+        Ok(())
     }
 
     fn compute_id(&self) -> String {
@@ -1320,5 +1351,98 @@ mod tests {
             }
             assert!((stage.dot(&codes, 0) - naive).abs() < 1e-9);
         }
+    }
+
+    fn signed_index(dir: &Path) -> PqrIndex {
+        let vectors: Vec<f32> = (0..9)
+            .flat_map(|i| [i as f32, (i % 3) as f32, (i % 5) as f32])
+            .collect();
+        let cfg = BuildConfig {
+            partitions: 3,
+            stages: vec![3],
+            iterations: 2,
+        };
+        let (index, _) = PqrIndex::build(&vectors, 3, &cfg, &[7u8; 32]).unwrap();
+        index.save(dir).unwrap();
+        index
+    }
+
+    fn write_signed(dir: &Path, index: &PqrIndex, name: &str, bytes: &[u8]) {
+        fs::write(dir.join(name), bytes).unwrap();
+        let path = dir.join(MANIFEST);
+        let mut manifest: Manifest = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        manifest.index_id = index.compute_id();
+        fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn load_rejects_order_that_is_not_a_permutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut index = signed_index(dir.path());
+        index.order[0] = index.order[1];
+        write_signed(dir.path(), &index, ORDER, &u32_bytes(&index.order));
+        assert!(matches!(
+            PqrIndex::load(dir.path(), &[7u8; 32]),
+            Err(IndexError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn load_rejects_malformed_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut index = signed_index(dir.path());
+        let original = index.starts.clone();
+        for (label, slot, value) in [
+            ("first", 0, 1u32),
+            ("decreasing", 1, original[2] + 1),
+            ("last", index.partitions, index.n as u32 + 1),
+        ] {
+            index.starts = original.clone();
+            index.starts[slot] = value;
+            write_signed(dir.path(), &index, STARTS, &u32_bytes(&index.starts));
+            assert!(
+                matches!(
+                    PqrIndex::load(dir.path(), &[7u8; 32]),
+                    Err(IndexError::Corrupt(_))
+                ),
+                "{label} starts were accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn load_rejects_assign_outside_partition_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut index = signed_index(dir.path());
+        index.assign[0] = index.partitions as u32;
+        write_signed(dir.path(), &index, ASSIGN, &u32_bytes(&index.assign));
+        assert!(matches!(
+            PqrIndex::load(dir.path(), &[7u8; 32]),
+            Err(IndexError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn load_rejects_non_finite_layout_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut index = signed_index(dir.path());
+        index.vectors[0] = f32::NAN;
+        index.centroids[0] = f32::INFINITY;
+        index.coeff_a[0] = f64::NAN;
+        index.coeff_k[0] = f64::INFINITY;
+        index.coeff_c[0] = f64::NEG_INFINITY;
+        write_signed(dir.path(), &index, VECTORS, &f32_bytes(&index.vectors));
+        write_signed(dir.path(), &index, CENTROIDS, &f32_bytes(&index.centroids));
+        let mut coeffs = Vec::with_capacity(index.coeff_a.len() * 2);
+        for i in 0..index.coeff_a.len() {
+            coeffs.push(index.coeff_a[i]);
+            coeffs.push(index.coeff_k[i]);
+        }
+        write_signed(dir.path(), &index, COEFFS, &f64_bytes(&coeffs));
+        write_signed(dir.path(), &index, COEFF_C, &f64_bytes(&index.coeff_c));
+        assert!(matches!(
+            PqrIndex::load(dir.path(), &[7u8; 32]),
+            Err(IndexError::NonFinite)
+        ));
     }
 }
