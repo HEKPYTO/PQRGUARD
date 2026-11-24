@@ -1,0 +1,73 @@
+# CI and release workflows
+
+## Permissions and pinning
+
+All workflows use `permissions: contents: read` by default. Only the release
+`package` job escalates to `attestations: write` and `id-token: write` for
+build provenance and keyless signing. No secrets are used. Every `uses` step
+is pinned to a full commit SHA; the trailing comment names the release tag.
+Checkouts set `persist-credentials: false`, and all Cargo build/test commands
+use `--locked`.
+
+## Workflows
+
+- `ci.yml` — format, clippy, tests, `cargo deny check`, `cargo audit`, and a
+  CycloneDX SBOM. Publishes artifact `sbom` with `sbom.cdx.json` and
+  `Cargo.lock`. `cargo-cyclonedx` 0.5.10 has no `--output` flag;
+  `--override-filename sbom.cdx` produces the same `sbom.cdx.json` file.
+- `nightly.yml` — scheduled certified audit with a generated fixture.
+- `release.yml` — runs on tags `v*` or `workflow_dispatch`. Builds
+  `pqr-guard` for `x86_64-unknown-linux-gnu` (native) and
+  `aarch64-unknown-linux-gnu` (via `cross`, which needs Docker). Each build
+  publishes `pqr-guard-<target>` with the binary and a target-specific SBOM.
+  The `package` job downloads both artifacts and publishes `release-assets`
+  containing both binaries, both SBOMs, `Cargo.lock`, `SHA256SUMS`, and one
+  Sigstore bundle (`*.sigstore.json`) per file. GitHub build provenance
+  attestations are attached to the workflow run, not to a GitHub Release.
+
+## Verify a release artifact
+
+Download `release-assets` from the workflow run and unpack it into `dist/`.
+Replace `HEKPYTO/PQRGUARD` with the repository if using a fork.
+
+1. Checksums:
+
+   ```sh
+   cd dist
+   sha256sum -c SHA256SUMS
+   ```
+
+2. Keyless Sigstore signatures (bundles contain the signature, certificate,
+   and transparency-log proof):
+
+   ```sh
+   for file in pqr-guard-* sbom-*.cdx.json Cargo.lock SHA256SUMS; do
+     cosign verify-blob \
+       --bundle "$file.sigstore.json" \
+       --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+       --certificate-identity-regexp '^https://github\.com/HEKPYTO/PQRGUARD/\.github/workflows/release\.yml@refs/(tags|heads)/' \
+       "$file"
+   done
+   ```
+
+3. GitHub build provenance:
+
+   ```sh
+   gh attestation verify dist/pqr-guard-x86_64-unknown-linux-gnu \
+     --repo HEKPYTO/PQRGUARD \
+     --signer-workflow HEKPYTO/PQRGUARD/.github/workflows/release.yml
+   ```
+
+4. SBOM contents:
+
+   ```sh
+   jq -r '.bomFormat, .specVersion, .metadata.component.name' dist/sbom-*.cdx.json
+   ```
+
+## Hosted-runner requirements
+
+`cargo install` steps compile pinned tool versions and need network access to
+crates.io. `cargo deny check` and `cargo audit` fetch the RustSec advisory
+database. GitHub artifact attestations are free on public repositories; a
+private repository needs GitHub Advanced Security. `cross` needs Docker,
+available on `ubuntu-latest`.
